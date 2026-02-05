@@ -110,6 +110,7 @@ defmodule ElixirchatWeb.ChatLive do
         starred_message_ids: starred_message_ids,
         other_user: other_user,
         is_other_user_blocked: other_user && Accounts.is_blocked?(current_user.id, other_user.id),
+        agent_processing: false,
         polls: polls,
         user_poll_votes: user_poll_votes,
         show_poll_modal: false,
@@ -1643,6 +1644,11 @@ defmodule ElixirchatWeb.ChatLive do
   end
 
   @impl true
+  def handle_info({:agent_processing, is_processing}, socket) do
+    {:noreply, assign(socket, agent_processing: is_processing)}
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
     <div class="h-screen bg-base-200 flex flex-col overflow-hidden" id="chat-container" phx-hook="BrowserNotification">
@@ -2391,6 +2397,25 @@ defmodule ElixirchatWeb.ChatLive do
                   <span>Delivered</span>
                 <% end %>
               <% end %>
+            </div>
+          </div>
+        </div>
+
+        <%!-- Agent thinking indicator --%>
+        <div :if={@agent_processing} class="chat chat-start" id="agent-thinking">
+          <div class="chat-image avatar avatar-placeholder">
+            <div class="w-10 h-10 rounded-full bg-info text-white font-bold flex items-center justify-center">
+              <span class="text-lg">AI</span>
+            </div>
+          </div>
+          <div class="chat-header">
+            <span class="text-secondary font-semibold">agent</span>
+            <span class="badge badge-secondary badge-xs ml-1">AI</span>
+          </div>
+          <div class="chat-bubble bg-base-300">
+            <div class="flex items-center gap-2">
+              <span class="loading loading-dots loading-sm"></span>
+              <span class="text-base-content/70">Thinking...</span>
             </div>
           </div>
         </div>

@@ -295,6 +295,9 @@ defmodule Elixirchat.Chat do
   # Spawns an async task to process @agent mentions
   defp maybe_process_agent_mention(conversation_id, content) do
     if Agent.contains_mention?(content) do
+      # Broadcast that agent is processing
+      broadcast_agent_processing(conversation_id, true)
+
       Task.Supervisor.start_child(
         Elixirchat.TaskSupervisor,
         fn -> Agent.process_message(conversation_id, content) end
@@ -302,6 +305,17 @@ defmodule Elixirchat.Chat do
     end
 
     :ok
+  end
+
+  @doc """
+  Broadcasts agent processing state to conversation subscribers.
+  """
+  def broadcast_agent_processing(conversation_id, is_processing) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:agent_processing, is_processing}
+    )
   end
 
   @doc """

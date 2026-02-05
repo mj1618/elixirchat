@@ -1,5 +1,39 @@
 # Task: Message Threads
 
+## COMPLETED - 2026-02-05 by Agent b723b367
+
+### What was done:
+1. Created `thread_replies` migration with proper schema and indexes
+2. Created `ThreadReply` schema in `lib/elixirchat/chat/thread_reply.ex`
+3. Updated `Message` schema with `has_many :thread_replies` and `thread_reply_count` virtual field
+4. Added thread functions to Chat context:
+   - `create_thread_reply/4` - creates reply with optional "also send to channel"
+   - `list_thread_replies/1` - fetches replies with user preloaded
+   - `get_thread_reply_count/1` - single message count
+   - `get_thread_reply_counts/1` - batch count for multiple messages
+   - `get_thread_parent_message!/1` - fetches parent message for thread view
+   - `subscribe_to_thread/1` and `unsubscribe_from_thread/1` - PubSub subscriptions
+   - `broadcast_thread_reply/2` - broadcasts new replies
+   - `broadcast_thread_count_update/3` - broadcasts count updates
+   - `search_thread_replies/2` - searches thread content
+5. Added full thread UI to ChatLive:
+   - "Reply in thread" button on message hover
+   - Thread count indicator on messages with replies
+   - Side panel thread view with parent message, replies, and input form
+   - "Also send to channel" checkbox
+   - Real-time updates via PubSub
+6. Added 8 comprehensive tests for thread functionality
+
+### Testing performed:
+- Ran Playwright browser tests verifying:
+  - Thread panel opens when clicking "Reply in thread"
+  - Parent message displayed in panel
+  - Thread replies can be sent
+  - Reply count badge shows on messages
+- All 8 unit tests pass
+
+---
+
 ## Description
 Allow users to reply to messages in a thread, creating organized sub-conversations within the main chat. Threads keep discussions focused and prevent the main conversation from getting cluttered with tangential topics. This is a common feature in Slack, Discord, and other modern chat applications.
 

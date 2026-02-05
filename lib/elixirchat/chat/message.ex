@@ -2,13 +2,14 @@ defmodule Elixirchat.Chat.Message do
   use Ecto.Schema
   import Ecto.Changeset
 
-  alias Elixirchat.Chat.{Conversation, Reaction, Attachment, LinkPreview}
+  alias Elixirchat.Chat.{Conversation, Reaction, Attachment, LinkPreview, ThreadReply}
   alias Elixirchat.Accounts.User
 
   schema "messages" do
     field :content, :string
     field :edited_at, :utc_datetime
     field :deleted_at, :utc_datetime
+    field :thread_reply_count, :integer, virtual: true, default: 0
 
     belongs_to :conversation, Conversation
     belongs_to :sender, User, foreign_key: :sender_id
@@ -17,6 +18,7 @@ defmodule Elixirchat.Chat.Message do
     belongs_to :forwarded_from_user, User
     has_many :reactions, Reaction
     has_many :attachments, Attachment
+    has_many :thread_replies, ThreadReply, foreign_key: :parent_message_id
     many_to_many :link_previews, LinkPreview, join_through: "message_link_previews"
 
     timestamps()

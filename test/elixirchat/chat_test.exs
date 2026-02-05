@@ -591,4 +591,236 @@ defmodule Elixirchat.ChatTest do
       assert received_message.forwarded_from_message_id == original_message.id
     end
   end
+
+  describe "create_thread_reply/4" do
+    test "creates a thread reply to a message" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent message")
+
+      {:ok, reply} = Chat.create_thread_reply(parent_message.id, user2.id, "This is a reply")
+
+      assert reply.content == "This is a reply"
+      assert reply.parent_message_id == parent_message.id
+      assert reply.user_id == user2.id
+      assert reply.also_sent_to_channel == false
+    end
+
+    test "creates reply with also_sent_to_channel option" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent message")
+
+      {:ok, reply} = Chat.create_thread_reply(parent_message.id, user2.id, "Reply also in channel", also_send_to_channel: true)
+
+      assert reply.also_sent_to_channel == true
+    end
+
+    test "fails with empty content" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent message")
+
+      assert {:error, changeset} = Chat.create_thread_reply(parent_message.id, user2.id, "")
+      assert "can't be blank" in errors_on(changeset).content
+    end
+
+    test "fails with content longer than 5000 characters" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent message")
+      long_content = String.duplicate("a", 5001)
+
+      assert {:error, changeset} = Chat.create_thread_reply(parent_message.id, user2.id, long_content)
+      assert "should be at most 5000 character(s)" in errors_on(changeset).content
+    end
+
+    test "returns error for non-existent parent message" do
+      user = user_fixture()
+
+      assert {:error, :invalid_message} = Chat.create_thread_reply(999_999, user.id, "Reply")
+    end
+
+    test "returns error for deleted parent message" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "To be deleted")
+
+      # Mark message as deleted
+      parent_message
+      |> Ecto.Changeset.change(%{deleted_at: DateTime.utc_now() |> DateTime.truncate(:second)})
+      |> Elixirchat.Repo.update!()
+
+      assert {:error, :invalid_message} = Chat.create_thread_reply(parent_message.id, user2.id, "Reply")
+    end
+
+    test "broadcasts thread reply when subscribed" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent message")
+
+      # Subscribe to thread
+      :ok = Chat.subscribe_to_thread(parent_message.id)
+
+      {:ok, reply} = Chat.create_thread_reply(parent_message.id, user2.id, "Thread reply")
+
+      assert_receive {:new_thread_reply, received_reply}
+      assert received_reply.id == reply.id
+    end
+
+    test "broadcasts thread count update when subscribed to conversation" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent message")
+
+      # Subscribe to conversation
+      :ok = Chat.subscribe(conversation.id)
+
+      {:ok, _reply} = Chat.create_thread_reply(parent_message.id, user2.id, "Thread reply")
+
+      assert_receive {:thread_count_updated, %{message_id: message_id, count: count}}
+      assert message_id == parent_message.id
+      assert count == 1
+    end
+  end
+
+  describe "list_thread_replies/1" do
+    test "returns all replies for a message" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent message")
+
+      {:ok, _reply1} = Chat.create_thread_reply(parent_message.id, user2.id, "Reply 1")
+      {:ok, _reply2} = Chat.create_thread_reply(parent_message.id, user1.id, "Reply 2")
+      {:ok, _reply3} = Chat.create_thread_reply(parent_message.id, user2.id, "Reply 3")
+
+      replies = Chat.list_thread_replies(parent_message.id)
+
+      assert length(replies) == 3
+      contents = Enum.map(replies, & &1.content)
+      assert "Reply 1" in contents
+      assert "Reply 2" in contents
+      assert "Reply 3" in contents
+    end
+
+    test "returns replies in chronological order" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent message")
+
+      {:ok, _reply1} = Chat.create_thread_reply(parent_message.id, user2.id, "First")
+      {:ok, _reply2} = Chat.create_thread_reply(parent_message.id, user1.id, "Second")
+      {:ok, _reply3} = Chat.create_thread_reply(parent_message.id, user2.id, "Third")
+
+      replies = Chat.list_thread_replies(parent_message.id)
+
+      assert Enum.at(replies, 0).content == "First"
+      assert Enum.at(replies, 1).content == "Second"
+      assert Enum.at(replies, 2).content == "Third"
+    end
+
+    test "preloads user on replies" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent message")
+
+      {:ok, _reply} = Chat.create_thread_reply(parent_message.id, user2.id, "Reply")
+
+      replies = Chat.list_thread_replies(parent_message.id)
+
+      assert hd(replies).user.id == user2.id
+      assert hd(replies).user.username == user2.username
+    end
+
+    test "returns empty list when no replies" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "No replies yet")
+
+      assert Chat.list_thread_replies(parent_message.id) == []
+    end
+  end
+
+  describe "get_thread_reply_count/1" do
+    test "returns count of replies for a message" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent message")
+
+      {:ok, _reply1} = Chat.create_thread_reply(parent_message.id, user2.id, "Reply 1")
+      {:ok, _reply2} = Chat.create_thread_reply(parent_message.id, user1.id, "Reply 2")
+
+      assert Chat.get_thread_reply_count(parent_message.id) == 2
+    end
+
+    test "returns 0 when no replies" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "No replies")
+
+      assert Chat.get_thread_reply_count(parent_message.id) == 0
+    end
+  end
+
+  describe "get_thread_reply_counts/1" do
+    test "returns counts for multiple messages" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, msg1} = Chat.send_message(conversation.id, user1.id, "Message 1")
+      {:ok, msg2} = Chat.send_message(conversation.id, user1.id, "Message 2")
+      {:ok, msg3} = Chat.send_message(conversation.id, user1.id, "Message 3")
+
+      {:ok, _} = Chat.create_thread_reply(msg1.id, user2.id, "Reply 1a")
+      {:ok, _} = Chat.create_thread_reply(msg1.id, user2.id, "Reply 1b")
+      {:ok, _} = Chat.create_thread_reply(msg2.id, user2.id, "Reply 2")
+
+      counts = Chat.get_thread_reply_counts([msg1.id, msg2.id, msg3.id])
+
+      assert counts[msg1.id] == 2
+      assert counts[msg2.id] == 1
+      assert Map.get(counts, msg3.id) == nil  # No replies, not in map
+    end
+
+    test "returns empty map for empty list" do
+      assert Chat.get_thread_reply_counts([]) == %{}
+    end
+  end
+
+  describe "subscribe_to_thread/1 and unsubscribe_from_thread/1" do
+    test "subscribes and unsubscribes from thread topic" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, parent_message} = Chat.send_message(conversation.id, user1.id, "Parent")
+
+      # Subscribe
+      :ok = Chat.subscribe_to_thread(parent_message.id)
+
+      # Create a reply - should receive it
+      {:ok, reply1} = Chat.create_thread_reply(parent_message.id, user2.id, "Reply 1")
+      assert_receive {:new_thread_reply, received}
+      assert received.id == reply1.id
+
+      # Unsubscribe
+      :ok = Chat.unsubscribe_from_thread(parent_message.id)
+
+      # Create another reply - should NOT receive it
+      {:ok, _reply2} = Chat.create_thread_reply(parent_message.id, user2.id, "Reply 2")
+      refute_receive {:new_thread_reply, _}, 100
+    end
+  end
 end
