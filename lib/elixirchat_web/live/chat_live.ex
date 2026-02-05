@@ -5,6 +5,7 @@ defmodule ElixirchatWeb.ChatLive do
   alias Elixirchat.Chat.{Reaction, Attachment, Markdown}
   alias Elixirchat.Agent
   alias Elixirchat.Presence
+  alias Elixirchat.Accounts
 
   @impl true
   def mount(%{"id" => conversation_id}, _session, socket) do
@@ -21,10 +22,24 @@ defmodule ElixirchatWeb.ChatLive do
       is_muted = Chat.is_muted?(conversation_id, current_user.id)
       is_archived = Chat.is_archived?(conversation_id, current_user.id)
       starred_message_ids = Chat.get_starred_message_ids(current_user.id)
+      polls = Chat.list_conversation_polls(conversation_id)
+      poll_ids = Enum.map(polls, & &1.id)
+      user_poll_votes = Chat.get_user_votes_for_polls(poll_ids, current_user.id)
 
       # Load read receipts for all messages
       message_ids = Enum.map(messages, & &1.id)
       read_receipts = Chat.get_read_receipts_for_messages(message_ids)
+
+      # Get other user for direct conversations (for status display)
+      other_user =
+        if conversation.type == "direct" do
+          case Enum.find(conversation.members, fn m -> m.user_id != current_user.id end) do
+            nil -> nil
+            member -> Accounts.get_user(member.user_id)
+          end
+        else
+          nil
+        end
 
       # Track presence and subscribe to updates when connected
       online_user_ids =
@@ -33,6 +48,12 @@ defmodule ElixirchatWeb.ChatLive do
           Chat.mark_conversation_read(conversation_id, current_user.id)
           Presence.track_user(self(), current_user)
           Presence.subscribe()
+
+          # Subscribe to other user's status changes in direct messages
+          if other_user do
+            Accounts.subscribe_to_user_status(other_user.id)
+          end
+
           Presence.get_online_user_ids()
         else
           []
@@ -77,11 +98,18 @@ defmodule ElixirchatWeb.ChatLive do
          is_muted: is_muted,
          is_archived: is_archived,
          is_conversation_pinned: is_conversation_pinned,
-        show_forward_modal: false,
-        forward_message_id: nil,
+         show_forward_modal: false,
+         forward_message_id: nil,
         forward_search_query: "",
         forward_conversations: [],
-        starred_message_ids: starred_message_ids
+        starred_message_ids: starred_message_ids,
+        other_user: other_user,
+        is_other_user_blocked: other_user && Accounts.is_blocked?(current_user.id, other_user.id),
+        polls: polls,
+        user_poll_votes: user_poll_votes,
+        show_poll_modal: false,
+        poll_question: "",
+        poll_options: ["", ""]
        )}
     else
       {:ok, redirect(socket, to: "/chats") |> put_flash(:error, "Access denied")}
@@ -148,6 +176,10 @@ defmodule ElixirchatWeb.ChatLive do
            socket
            |> put_flash(:error, "Cannot reply to that message")
            |> assign(replying_to: nil)}
+        {:error, :user_blocked} ->
+          {:noreply, put_flash(socket, :error, "You have blocked this user. Unblock them to send messages.")}
+        {:error, :blocked_by_user} ->
+          {:noreply, put_flash(socket, :error, "You cannot send messages to this user.")}
         {:error, _} ->
           {:noreply, put_flash(socket, :error, "Failed to send message")}
       end
@@ -265,6 +297,42 @@ defmodule ElixirchatWeb.ChatLive do
   end
 
   # ===============================
+  # Block User Handler (for direct conversations)
+  # ===============================
+
+  @impl true
+  def handle_event("toggle_block_user", _, socket) do
+    conversation = socket.assigns.conversation
+    current_user = socket.assigns.current_user
+    other_user = socket.assigns.other_user
+
+    if conversation.type == "direct" && other_user do
+      if socket.assigns.is_other_user_blocked do
+        # Unblock user
+        Accounts.unblock_user(current_user.id, other_user.id)
+        {:noreply,
+         socket
+         |> assign(is_other_user_blocked: false)
+         |> put_flash(:info, "User unblocked")}
+      else
+        # Block user
+        case Accounts.block_user(current_user.id, other_user.id) do
+          {:ok, _} ->
+            {:noreply,
+             socket
+             |> assign(is_other_user_blocked: true)
+             |> put_flash(:info, "User blocked")}
+
+          {:error, _} ->
+            {:noreply, put_flash(socket, :error, "Could not block user")}
+        end
+      end
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # ===============================
   # Archive Conversation Handler
   # ===============================
 
@@ -312,6 +380,143 @@ defmodule ElixirchatWeb.ChatLive do
       {:error, _reason} ->
         {:noreply, put_flash(socket, :error, "Could not star message")}
     end
+  end
+
+  # ===============================
+  # Poll Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("show_poll_modal", _, socket) do
+    {:noreply, assign(socket, show_poll_modal: true, poll_question: "", poll_options: ["", ""])}
+  end
+
+  @impl true
+  def handle_event("close_poll_modal", _, socket) do
+    {:noreply, assign(socket, show_poll_modal: false)}
+  end
+
+  @impl true
+  def handle_event("update_poll_question", %{"value" => question}, socket) do
+    {:noreply, assign(socket, poll_question: question)}
+  end
+
+  @impl true
+  def handle_event("update_poll_option", %{"index" => index, "value" => value}, socket) do
+    index = String.to_integer(index)
+    options = List.replace_at(socket.assigns.poll_options, index, value)
+    {:noreply, assign(socket, poll_options: options)}
+  end
+
+  @impl true
+  def handle_event("add_poll_option", _, socket) do
+    if length(socket.assigns.poll_options) < 10 do
+      options = socket.assigns.poll_options ++ [""]
+      {:noreply, assign(socket, poll_options: options)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("remove_poll_option", %{"index" => index}, socket) do
+    if length(socket.assigns.poll_options) > 2 do
+      index = String.to_integer(index)
+      options = List.delete_at(socket.assigns.poll_options, index)
+      {:noreply, assign(socket, poll_options: options)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("create_poll", %{"question" => question} = params, socket) do
+    options =
+      params
+      |> Map.get("options", %{})
+      |> Map.values()
+      |> Enum.filter(fn opt -> String.trim(opt) != "" end)
+
+    case Chat.create_poll(
+           socket.assigns.conversation.id,
+           socket.assigns.current_user.id,
+           question,
+           options
+         ) do
+      {:ok, poll} ->
+        # Update user_poll_votes map for the new poll (no votes yet)
+        user_poll_votes = Map.put(socket.assigns.user_poll_votes, poll.id, MapSet.new())
+
+        {:noreply,
+         socket
+         |> assign(show_poll_modal: false, user_poll_votes: user_poll_votes)
+         |> update(:polls, fn polls -> [poll | polls] end)
+         |> put_flash(:info, "Poll created")}
+
+      {:error, :too_few_options} ->
+        {:noreply, put_flash(socket, :error, "Poll must have at least 2 options")}
+
+      {:error, :too_many_options} ->
+        {:noreply, put_flash(socket, :error, "Poll can have at most 10 options")}
+
+      {:error, :empty_option} ->
+        {:noreply, put_flash(socket, :error, "Poll options cannot be empty")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not create poll")}
+    end
+  end
+
+  @impl true
+  def handle_event("vote_on_poll", %{"poll-id" => poll_id, "option-id" => option_id}, socket) do
+    poll_id = String.to_integer(poll_id)
+    option_id = String.to_integer(option_id)
+
+    case Chat.vote_on_poll(poll_id, option_id, socket.assigns.current_user.id) do
+      {:ok, poll} ->
+        {:noreply, update_poll_in_list(socket, poll)}
+
+      {:error, :poll_closed} ->
+        {:noreply, put_flash(socket, :error, "This poll is closed")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not vote")}
+    end
+  end
+
+  @impl true
+  def handle_event("close_poll", %{"poll-id" => poll_id}, socket) do
+    poll_id = String.to_integer(poll_id)
+
+    case Chat.close_poll(poll_id, socket.assigns.current_user.id) do
+      {:ok, poll} ->
+        {:noreply,
+         socket
+         |> update_poll_in_list(poll)
+         |> put_flash(:info, "Poll closed")}
+
+      {:error, :not_creator} ->
+        {:noreply, put_flash(socket, :error, "Only the poll creator can close it")}
+
+      {:error, :already_closed} ->
+        {:noreply, put_flash(socket, :error, "Poll is already closed")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not close poll")}
+    end
+  end
+
+  defp update_poll_in_list(socket, updated_poll) do
+    polls =
+      Enum.map(socket.assigns.polls, fn poll ->
+        if poll.id == updated_poll.id, do: updated_poll, else: poll
+      end)
+
+    # Update user's votes for this poll
+    user_votes = Chat.get_user_poll_votes(updated_poll.id, socket.assigns.current_user.id)
+    user_poll_votes = Map.put(socket.assigns.user_poll_votes, updated_poll.id, user_votes)
+
+    assign(socket, polls: polls, user_poll_votes: user_poll_votes)
   end
 
   @impl true
@@ -959,6 +1164,36 @@ defmodule ElixirchatWeb.ChatLive do
   end
 
   @impl true
+  def handle_info({:status_changed, user_id, new_status}, socket) do
+    # Update other_user's status in direct messages
+    if socket.assigns.other_user && socket.assigns.other_user.id == user_id do
+      other_user = %{socket.assigns.other_user | status: new_status}
+      {:noreply, assign(socket, other_user: other_user)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_info({:poll_created, poll}, socket) do
+    # Add the poll to the list if not already present
+    if Enum.any?(socket.assigns.polls, fn p -> p.id == poll.id end) do
+      {:noreply, socket}
+    else
+      user_poll_votes = Map.put(socket.assigns.user_poll_votes, poll.id, MapSet.new())
+      {:noreply,
+       socket
+       |> assign(user_poll_votes: user_poll_votes)
+       |> update(:polls, fn polls -> [poll | polls] end)}
+    end
+  end
+
+  @impl true
+  def handle_info({:poll_updated, poll}, socket) do
+    {:noreply, update_poll_in_list(socket, poll)}
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
     <div class="h-screen bg-base-200 flex flex-col overflow-hidden" id="chat-container" phx-hook="BrowserNotification">
@@ -996,6 +1231,9 @@ defmodule ElixirchatWeb.ChatLive do
                     {if is_other_user_online?(@conversation, @current_user.id, @online_user_ids), do: "Online", else: "Offline"}
                   </span>
                 </div>
+              </div>
+              <div :if={@conversation.type == "direct" && @other_user && @other_user.status} class="text-xs text-base-content/60 truncate max-w-48">
+                {@other_user.status}
               </div>
               <span :if={@conversation.type == "group"} class="text-xs text-base-content/70">
                 {get_online_count(@members, @online_user_ids)}/{length(@members)} online
@@ -1045,6 +1283,17 @@ defmodule ElixirchatWeb.ChatLive do
                 <path stroke-linecap="round" stroke-linejoin="round" d="m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" />
               </svg>
             <% end %>
+          </button>
+          <%!-- Block user button (only for direct conversations) --%>
+          <button
+            :if={@conversation.type == "direct" && @other_user}
+            phx-click="toggle_block_user"
+            class={["btn btn-ghost btn-sm", @is_other_user_blocked && "text-error"]}
+            title={if @is_other_user_blocked, do: "Unblock user", else: "Block user"}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728A9 9 0 0 1 5.636 5.636m12.728 12.728L5.636 5.636" />
+            </svg>
           </button>
           <%!-- Theme toggle --%>
           <ElixirchatWeb.Layouts.theme_toggle />
@@ -1252,7 +1501,66 @@ defmodule ElixirchatWeb.ChatLive do
 
       <div class="flex-1 overflow-y-auto p-4 relative" id="messages-container" phx-hook="ScrollToBottom">
         <div class="max-w-2xl mx-auto space-y-4">
-          <div :if={@messages == []} class="text-center py-12 text-base-content/70">
+          <%!-- Active Polls section --%>
+          <div :if={length(@polls) > 0} class="space-y-4 mb-6">
+            <div :for={poll <- @polls} class="card bg-base-100 shadow-lg border border-base-300">
+              <div class="card-body p-4">
+                <div class="flex justify-between items-start gap-2">
+                  <div class="flex-1">
+                    <h3 class="font-bold text-base">{poll.question}</h3>
+                    <p class="text-xs text-base-content/60 mt-1">
+                      by @{poll.creator.username}
+                      <span :if={poll.closed_at} class="badge badge-sm badge-neutral ml-2">Closed</span>
+                      <span :if={is_nil(poll.closed_at)} class="ml-2">{poll.total_votes} {if poll.total_votes == 1, do: "vote", else: "votes"}</span>
+                    </p>
+                  </div>
+                  <button
+                    :if={poll.creator_id == @current_user.id && is_nil(poll.closed_at)}
+                    phx-click="close_poll"
+                    phx-value-poll-id={poll.id}
+                    class="btn btn-ghost btn-xs"
+                    title="Close poll"
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <div class="space-y-2 mt-3">
+                  <div :for={option <- poll.options} class="relative">
+                    <button
+                      phx-click="vote_on_poll"
+                      phx-value-poll-id={poll.id}
+                      phx-value-option-id={option.id}
+                      disabled={poll.closed_at != nil}
+                      class={[
+                        "w-full text-left p-3 rounded-lg border transition-all relative overflow-hidden",
+                        user_voted_for_option?(poll.id, option.id, @user_poll_votes) && "border-primary bg-primary/10" || "border-base-300 hover:border-primary",
+                        poll.closed_at && "cursor-not-allowed opacity-75" || ""
+                      ]}
+                    >
+                      <%!-- Progress bar background --%>
+                      <div
+                        class={[
+                          "absolute inset-y-0 left-0 transition-all duration-300",
+                          user_voted_for_option?(poll.id, option.id, @user_poll_votes) && "bg-primary/20" || "bg-base-200"
+                        ]}
+                        style={"width: #{option.percentage}%"}
+                      />
+                      <div class="flex justify-between items-center relative z-10">
+                        <span class="font-medium">{option.text}</span>
+                        <span class="text-sm font-semibold ml-2">{option.percentage}%</span>
+                      </div>
+                    </button>
+                    <div :if={option.vote_count > 0} class="text-xs text-base-content/60 mt-1 pl-2">
+                      {option.vote_count} {if option.vote_count == 1, do: "vote", else: "votes"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div :if={@messages == [] && @polls == []} class="text-center py-12 text-base-content/70">
             <p>No messages yet. Say hello!</p>
           </div>
 
@@ -1621,6 +1929,17 @@ defmodule ElixirchatWeb.ChatLive do
                   <path stroke-linecap="round" stroke-linejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13" />
                 </svg>
               </label>
+              <%!-- Create Poll button --%>
+              <button
+                type="button"
+                phx-click="show_poll_modal"
+                class="btn btn-ghost btn-circle self-center"
+                title="Create poll"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
+                </svg>
+              </button>
               <%!-- Emoji picker --%>
               <div id="emoji-picker" phx-hook="EmojiPicker" class="relative self-center">
                 <button
@@ -1743,6 +2062,85 @@ defmodule ElixirchatWeb.ChatLive do
           </div>
         </div>
         <div class="modal-backdrop bg-base-content/50" phx-click="cancel_delete"></div>
+      </div>
+
+      <%!-- Create Poll modal --%>
+      <div :if={@show_poll_modal} class="modal modal-open">
+        <div class="modal-box">
+          <h3 class="font-bold text-lg mb-4">Create Poll</h3>
+
+          <form phx-submit="create_poll">
+            <div class="form-control mb-4">
+              <label class="label">
+                <span class="label-text">Question</span>
+              </label>
+              <input
+                type="text"
+                name="question"
+                value={@poll_question}
+                phx-keyup="update_poll_question"
+                phx-debounce="100"
+                placeholder="Ask a question..."
+                class="input input-bordered w-full"
+                required
+                maxlength="500"
+                autofocus
+              />
+            </div>
+
+            <div class="form-control mb-4">
+              <label class="label">
+                <span class="label-text">Options</span>
+                <span class="label-text-alt">{length(@poll_options)}/10</span>
+              </label>
+
+              <div class="space-y-2">
+                <div :for={{option, index} <- Enum.with_index(@poll_options)} class="flex gap-2">
+                  <input
+                    type="text"
+                    name={"options[#{index}]"}
+                    value={option}
+                    phx-keyup="update_poll_option"
+                    phx-value-index={index}
+                    phx-debounce="100"
+                    placeholder={"Option #{index + 1}"}
+                    class="input input-bordered flex-1"
+                    required
+                    maxlength="200"
+                  />
+                  <button
+                    :if={length(@poll_options) > 2}
+                    type="button"
+                    phx-click="remove_poll_option"
+                    phx-value-index={index}
+                    class="btn btn-ghost btn-circle btn-sm self-center"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <button
+                :if={length(@poll_options) < 10}
+                type="button"
+                phx-click="add_poll_option"
+                class="btn btn-ghost btn-sm mt-2"
+              >
+                + Add option
+              </button>
+            </div>
+
+            <div class="modal-action">
+              <button type="button" phx-click="close_poll_modal" class="btn btn-ghost">Cancel</button>
+              <button type="submit" class="btn btn-primary" disabled={length(@poll_options) < 2 || String.trim(@poll_question) == ""}>
+                Create Poll
+              </button>
+            </div>
+          </form>
+        </div>
+        <div class="modal-backdrop bg-base-content/50" phx-click="close_poll_modal"></div>
       </div>
     </div>
     """
@@ -1951,6 +2349,14 @@ defmodule ElixirchatWeb.ChatLive do
   # Checks if user can unpin (is the pinner or message author)
   defp can_unpin?(user_id, pinned) do
     pinned.pinned_by_id == user_id || pinned.message.sender_id == user_id
+  end
+
+  # Checks if user has voted for a specific poll option
+  defp user_voted_for_option?(poll_id, option_id, user_poll_votes) do
+    case Map.get(user_poll_votes, poll_id) do
+      nil -> false
+      votes -> MapSet.member?(votes, option_id)
+    end
   end
 
   # Link preview card component

@@ -19,7 +19,9 @@ defmodule ElixirchatWeb.SettingsLive do
        password_form: to_form(password_changeset, as: "password"),
        current_password: "",
        show_delete_modal: false,
-       delete_confirmation: ""
+       delete_confirmation: "",
+       status_input: current_user.status || "",
+       preset_statuses: Accounts.preset_statuses()
      )}
   end
 
@@ -133,6 +135,68 @@ defmodule ElixirchatWeb.SettingsLive do
           </div>
         </div>
 
+        <!-- Status Section -->
+        <div class="card bg-base-100 shadow-xl mb-6">
+          <div class="card-body">
+            <h2 class="card-title">Status</h2>
+            <p class="text-sm text-base-content/70 mb-2">Let others know what you're up to</p>
+
+            <div class="form-control">
+              <label class="label">
+                <span class="label-text font-medium">Current Status</span>
+                <span class="label-text-alt text-base-content/60">
+                  {String.length(@status_input)}/100
+                </span>
+              </label>
+
+              <form phx-submit="set_status" class="flex gap-2">
+                <input
+                  type="text"
+                  name="status"
+                  value={@status_input}
+                  phx-change="update_status_input"
+                  maxlength="100"
+                  placeholder="What's your status?"
+                  class="input input-bordered flex-1"
+                />
+                <button type="submit" class="btn btn-primary">
+                  Set
+                </button>
+                <button
+                  :if={@current_user.status}
+                  type="button"
+                  phx-click="clear_status"
+                  class="btn btn-ghost btn-circle"
+                  title="Clear status"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </form>
+
+              <div :if={@current_user.status} class="mt-2 p-2 bg-base-200 rounded-lg flex items-center gap-2">
+                <span class="text-sm text-base-content/70">Current:</span>
+                <span class="font-medium">{@current_user.status}</span>
+              </div>
+            </div>
+
+            <div class="divider my-2">Preset Statuses</div>
+
+            <div class="flex flex-wrap gap-2">
+              <button
+                :for={preset <- @preset_statuses}
+                phx-click="set_preset_status"
+                phx-value-status={preset.text}
+                phx-value-emoji={preset.emoji}
+                class="btn btn-sm btn-outline"
+              >
+                {preset.emoji} {preset.text}
+              </button>
+            </div>
+          </div>
+        </div>
+
         <!-- Change Password Section -->
         <div class="card bg-base-100 shadow-xl mb-6">
           <div class="card-body">
@@ -174,6 +238,24 @@ defmodule ElixirchatWeb.SettingsLive do
                 </button>
               </div>
             </.form>
+          </div>
+        </div>
+
+        <!-- Privacy Settings -->
+        <div class="card bg-base-100 shadow-xl mb-6">
+          <div class="card-body">
+            <h2 class="card-title">Privacy</h2>
+            <p class="text-base-content/70">
+              Manage your blocked users and privacy settings.
+            </p>
+            <div class="card-actions justify-end mt-4">
+              <.link navigate={~p"/settings/blocked"} class="btn btn-outline">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728A9 9 0 0 1 5.636 5.636m12.728 12.728L5.636 5.636" />
+                </svg>
+                Blocked Users
+              </.link>
+            </div>
           </div>
         </div>
 
@@ -348,6 +430,59 @@ defmodule ElixirchatWeb.SettingsLive do
       end
     else
       {:noreply, socket}
+    end
+  end
+
+  # ===============================
+  # Status Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("update_status_input", %{"status" => status}, socket) do
+    {:noreply, assign(socket, status_input: status)}
+  end
+
+  @impl true
+  def handle_event("set_status", %{"status" => status}, socket) do
+    case Accounts.update_user_status(socket.assigns.current_user, status) do
+      {:ok, user} ->
+        {:noreply,
+         socket
+         |> assign(current_user: user, status_input: user.status || "")
+         |> put_flash(:info, "Status updated")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not update status")}
+    end
+  end
+
+  @impl true
+  def handle_event("set_preset_status", %{"status" => text, "emoji" => emoji}, socket) do
+    status = "#{emoji} #{text}"
+
+    case Accounts.update_user_status(socket.assigns.current_user, status) do
+      {:ok, user} ->
+        {:noreply,
+         socket
+         |> assign(current_user: user, status_input: status)
+         |> put_flash(:info, "Status updated")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not update status")}
+    end
+  end
+
+  @impl true
+  def handle_event("clear_status", _, socket) do
+    case Accounts.clear_user_status(socket.assigns.current_user) do
+      {:ok, user} ->
+        {:noreply,
+         socket
+         |> assign(current_user: user, status_input: "")
+         |> put_flash(:info, "Status cleared")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not clear status")}
     end
   end
 

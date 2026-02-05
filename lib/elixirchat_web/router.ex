@@ -44,6 +44,7 @@ defmodule ElixirchatWeb.Router do
       live "/groups/new", GroupNewLive
       live "/starred", StarredLive
       live "/settings", SettingsLive
+      live "/settings/blocked", BlockedUsersLive
     end
   end
 

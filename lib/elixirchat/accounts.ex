@@ -3,8 +3,10 @@ defmodule Elixirchat.Accounts do
   The Accounts context.
   """
 
+  import Ecto.Query, warn: false
+
   alias Elixirchat.Repo
-  alias Elixirchat.Accounts.User
+  alias Elixirchat.Accounts.{User, BlockedUser}
 
   @doc """
   Creates a user with the given attributes.
@@ -181,4 +183,194 @@ defmodule Elixirchat.Accounts do
   """
   def has_avatar?(%User{avatar_filename: nil}), do: false
   def has_avatar?(%User{avatar_filename: _}), do: true
+
+  # ===============================
+  # Status Functions
+  # ===============================
+
+  @doc """
+  Updates the user's status.
+  Empty or whitespace-only status is treated as clearing the status.
+  """
+  def update_user_status(%User{} = user, status) when is_binary(status) do
+    status = String.trim(status)
+    status = if status == "", do: nil, else: status
+
+    result =
+      user
+      |> User.status_changeset(%{
+        status: status,
+        status_updated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+      |> Repo.update()
+
+    case result do
+      {:ok, updated_user} ->
+        broadcast_status_change(updated_user)
+        {:ok, updated_user}
+
+      error ->
+        error
+    end
+  end
+
+  def update_user_status(%User{} = user, nil) do
+    clear_user_status(user)
+  end
+
+  @doc """
+  Clears the user's status.
+  """
+  def clear_user_status(%User{} = user) do
+    result =
+      user
+      |> User.status_changeset(%{status: nil, status_updated_at: nil})
+      |> Repo.update()
+
+    case result do
+      {:ok, updated_user} ->
+        broadcast_status_change(updated_user)
+        {:ok, updated_user}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Returns a list of preset status options.
+  """
+  def preset_statuses do
+    [
+      %{emoji: "🟢", text: "Available"},
+      %{emoji: "💼", text: "In a meeting"},
+      %{emoji: "🏠", text: "Working from home"},
+      %{emoji: "🚫", text: "Do not disturb"},
+      %{emoji: "🌴", text: "On vacation"},
+      %{emoji: "🍔", text: "Out to lunch"},
+      %{emoji: "😷", text: "Out sick"},
+      %{emoji: "🚗", text: "Commuting"}
+    ]
+  end
+
+  defp broadcast_status_change(user) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "user:#{user.id}:status",
+      {:status_changed, user.id, user.status}
+    )
+  end
+
+  @doc """
+  Subscribe to status changes for a specific user.
+  """
+  def subscribe_to_user_status(user_id) do
+    Phoenix.PubSub.subscribe(Elixirchat.PubSub, "user:#{user_id}:status")
+  end
+
+  # ===============================
+  # Block User Functions
+  # ===============================
+
+  @doc """
+  Blocks a user. The blocker_id is the user doing the blocking, blocked_id is the user being blocked.
+  Returns {:ok, blocked_user} or {:error, changeset}.
+  """
+  def block_user(blocker_id, blocked_id) do
+    %BlockedUser{}
+    |> BlockedUser.changeset(%{
+      blocker_id: blocker_id,
+      blocked_id: blocked_id,
+      blocked_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    })
+    |> Repo.insert()
+  end
+
+  @doc """
+  Unblocks a user.
+  Returns :ok whether or not the user was previously blocked.
+  """
+  def unblock_user(blocker_id, blocked_id) do
+    from(b in BlockedUser,
+      where: b.blocker_id == ^blocker_id and b.blocked_id == ^blocked_id
+    )
+    |> Repo.delete_all()
+
+    :ok
+  end
+
+  @doc """
+  Checks if blocker_id has blocked blocked_id.
+  Returns true if blocked, false otherwise.
+  """
+  def is_blocked?(blocker_id, blocked_id) do
+    from(b in BlockedUser,
+      where: b.blocker_id == ^blocker_id and b.blocked_id == ^blocked_id
+    )
+    |> Repo.exists?()
+  end
+
+  @doc """
+  Checks if user_id is blocked by other_id.
+  This is the reverse perspective - has the other person blocked me?
+  """
+  def is_blocked_by?(user_id, other_id) do
+    is_blocked?(other_id, user_id)
+  end
+
+  @doc """
+  Lists all users blocked by the given user.
+  Returns a list of BlockedUser structs with the blocked user preloaded.
+  """
+  def list_blocked_users(user_id) do
+    from(b in BlockedUser,
+      where: b.blocker_id == ^user_id,
+      join: u in assoc(b, :blocked),
+      preload: [blocked: u],
+      order_by: [desc: b.blocked_at]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Gets blocked user IDs for a user as a MapSet for fast lookup.
+  """
+  def get_blocked_user_ids(user_id) do
+    from(b in BlockedUser,
+      where: b.blocker_id == ^user_id,
+      select: b.blocked_id
+    )
+    |> Repo.all()
+    |> MapSet.new()
+  end
+
+  @doc """
+  Gets user IDs that have blocked the given user (blockers of this user).
+  Useful for checking if someone has blocked you.
+  """
+  def get_blocker_ids(user_id) do
+    from(b in BlockedUser,
+      where: b.blocked_id == ^user_id,
+      select: b.blocker_id
+    )
+    |> Repo.all()
+    |> MapSet.new()
+  end
+
+  @doc """
+  Checks if there's a block relationship in either direction between two users.
+  Returns :ok if no blocks, or {:error, :user_blocked | :blocked_by_user}.
+  """
+  def check_block_status(user1_id, user2_id) do
+    cond do
+      is_blocked?(user1_id, user2_id) ->
+        {:error, :user_blocked}
+
+      is_blocked_by?(user1_id, user2_id) ->
+        {:error, :blocked_by_user}
+
+      true ->
+        :ok
+    end
+  end
 end

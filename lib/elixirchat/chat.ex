@@ -6,7 +6,7 @@ defmodule Elixirchat.Chat do
   import Ecto.Query, warn: false
 
   alias Elixirchat.Repo
-  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt, Attachment, Mentions, PinnedMessage, LinkPreview, MessageLinkPreview, UrlExtractor, LinkPreviewFetcher, MutedConversation, StarredMessage}
+  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt, Attachment, Mentions, PinnedMessage, LinkPreview, MessageLinkPreview, UrlExtractor, LinkPreviewFetcher, MutedConversation, StarredMessage, Poll, PollOption, PollVote, GroupInvite}
   alias Elixirchat.Accounts.User
   alias Elixirchat.Agent
 
@@ -21,19 +21,30 @@ defmodule Elixirchat.Chat do
 
   @doc """
   Gets or creates a direct conversation between two users.
+  Returns {:error, :user_blocked} if the user has blocked the other person.
+  Returns {:error, :blocked_by_user} if the other person has blocked the user.
   """
   def get_or_create_direct_conversation(user1_id, user2_id) do
-    # Find existing direct conversation between these two users
-    query =
-      from c in Conversation,
-        where: c.type == "direct",
-        join: m1 in ConversationMember, on: m1.conversation_id == c.id and m1.user_id == ^user1_id,
-        join: m2 in ConversationMember, on: m2.conversation_id == c.id and m2.user_id == ^user2_id,
-        select: c
+    alias Elixirchat.Accounts
 
-    case Repo.one(query) do
-      nil -> create_direct_conversation(user1_id, user2_id)
-      conversation -> {:ok, conversation}
+    # Check for blocks before creating/getting conversation
+    case Accounts.check_block_status(user1_id, user2_id) do
+      {:error, reason} ->
+        {:error, reason}
+
+      :ok ->
+        # Find existing direct conversation between these two users
+        query =
+          from c in Conversation,
+            where: c.type == "direct",
+            join: m1 in ConversationMember, on: m1.conversation_id == c.id and m1.user_id == ^user1_id,
+            join: m2 in ConversationMember, on: m2.conversation_id == c.id and m2.user_id == ^user2_id,
+            select: c
+
+        case Repo.one(query) do
+          nil -> create_direct_conversation(user1_id, user2_id)
+          conversation -> {:ok, conversation}
+        end
     end
   end
 
@@ -182,23 +193,48 @@ defmodule Elixirchat.Chat do
   Sends a message in a conversation.
   Accepts optional opts with :reply_to_id for replying to a specific message,
   and :attachments for file attachments.
+
+  For direct conversations, returns {:error, :user_blocked} if sender has blocked the recipient,
+  or {:error, :blocked_by_user} if sender is blocked by the recipient.
   """
   def send_message(conversation_id, sender_id, content, opts \\ []) do
-    reply_to_id = Keyword.get(opts, :reply_to_id)
-    attachments = Keyword.get(opts, :attachments, [])
+    alias Elixirchat.Accounts
 
-    # Validate reply_to if provided
-    if reply_to_id do
-      reply_to = Repo.get(Message, reply_to_id)
-      if is_nil(reply_to) or reply_to.conversation_id != conversation_id do
-        {:error, :invalid_reply_to}
+    conversation = get_conversation!(conversation_id)
+
+    # Check for blocks in direct conversations
+    with :ok <- check_direct_conversation_block(conversation, sender_id) do
+      reply_to_id = Keyword.get(opts, :reply_to_id)
+      attachments = Keyword.get(opts, :attachments, [])
+
+      # Validate reply_to if provided
+      if reply_to_id do
+        reply_to = Repo.get(Message, reply_to_id)
+        if is_nil(reply_to) or reply_to.conversation_id != conversation_id do
+          {:error, :invalid_reply_to}
+        else
+          do_send_message(conversation_id, sender_id, content, reply_to_id, attachments)
+        end
       else
-        do_send_message(conversation_id, sender_id, content, reply_to_id, attachments)
+        do_send_message(conversation_id, sender_id, content, nil, attachments)
       end
-    else
-      do_send_message(conversation_id, sender_id, content, nil, attachments)
     end
   end
+
+  # Checks if the sender is blocked or has blocked the other user in a direct conversation
+  defp check_direct_conversation_block(%Conversation{type: "direct"} = conversation, sender_id) do
+    alias Elixirchat.Accounts
+
+    other_user = get_other_user(conversation, sender_id)
+
+    if other_user do
+      Accounts.check_block_status(sender_id, other_user.id)
+    else
+      :ok
+    end
+  end
+
+  defp check_direct_conversation_block(_conversation, _sender_id), do: :ok
 
   defp do_send_message(conversation_id, sender_id, content, reply_to_id, attachments) do
     attrs = %{
@@ -421,20 +457,41 @@ defmodule Elixirchat.Chat do
 
   @doc """
   Searches users by username (excluding the current user).
+  Optionally filters out blocked users and users who have blocked the searcher.
+  Options:
+    - :exclude_blocked - if true, excludes users involved in any block relationship (default: false)
   """
-  def search_users(query, current_user_id) when byte_size(query) > 0 do
-    search_term = "%#{query}%"
+  def search_users(query, current_user_id, opts \\ [])
 
-    from(u in User,
-      where: u.id != ^current_user_id,
-      where: ilike(u.username, ^search_term),
-      limit: 10,
-      order_by: u.username
-    )
-    |> Repo.all()
+  def search_users(query, current_user_id, opts) when byte_size(query) > 0 do
+    alias Elixirchat.Accounts
+
+    search_term = "%#{query}%"
+    exclude_blocked = Keyword.get(opts, :exclude_blocked, false)
+
+    base_query =
+      from(u in User,
+        where: u.id != ^current_user_id,
+        where: ilike(u.username, ^search_term),
+        limit: 10,
+        order_by: u.username
+      )
+
+    if exclude_blocked do
+      # Get users to exclude (blocked by current user or have blocked current user)
+      blocked_ids = Accounts.get_blocked_user_ids(current_user_id)
+      blocker_ids = Accounts.get_blocker_ids(current_user_id)
+      excluded_ids = MapSet.union(blocked_ids, blocker_ids) |> MapSet.to_list()
+
+      from(u in base_query, where: u.id not in ^excluded_ids)
+      |> Repo.all()
+    else
+      base_query
+      |> Repo.all()
+    end
   end
 
-  def search_users(_, _), do: []
+  def search_users(_, _, _), do: []
 
   @doc """
   Searches users by username who are NOT already members of a conversation.
@@ -1625,5 +1682,274 @@ defmodule Elixirchat.Chat do
     )
     |> Repo.all()
     |> MapSet.new()
+  end
+
+  # ===============================
+  # Poll Functions
+  # ===============================
+
+  @doc """
+  Creates a poll in a conversation with the given options.
+  Options must be a list of 2-10 strings.
+  Returns {:ok, poll} or {:error, reason}.
+  """
+  def create_poll(conversation_id, creator_id, question, options, attrs \\ %{})
+      when is_list(options) do
+    cond do
+      length(options) < 2 ->
+        {:error, :too_few_options}
+
+      length(options) > 10 ->
+        {:error, :too_many_options}
+
+      Enum.any?(options, fn opt -> String.trim(opt) == "" end) ->
+        {:error, :empty_option}
+
+      true ->
+        Repo.transaction(fn ->
+          # Create the poll
+          poll_attrs =
+            Map.merge(attrs, %{
+              question: question,
+              conversation_id: conversation_id,
+              creator_id: creator_id
+            })
+
+          {:ok, poll} =
+            %Poll{}
+            |> Poll.changeset(poll_attrs)
+            |> Repo.insert()
+
+          # Create options
+          options
+          |> Enum.with_index()
+          |> Enum.each(fn {text, index} ->
+            %PollOption{}
+            |> PollOption.changeset(%{
+              text: String.trim(text),
+              position: index,
+              poll_id: poll.id
+            })
+            |> Repo.insert!()
+          end)
+
+          # Return poll with preloaded data and computed results
+          poll = get_poll!(poll.id)
+          broadcast_poll_created(conversation_id, poll)
+          poll
+        end)
+    end
+  end
+
+  @doc """
+  Gets a poll by ID with options, votes, and computed results.
+  """
+  def get_poll!(poll_id) do
+    poll =
+      Poll
+      |> Repo.get!(poll_id)
+      |> Repo.preload([:creator, options: :votes])
+
+    compute_poll_results(poll)
+  end
+
+  @doc """
+  Gets a poll by ID, returning nil if not found.
+  """
+  def get_poll(poll_id) do
+    case Repo.get(Poll, poll_id) do
+      nil -> nil
+      poll ->
+        poll
+        |> Repo.preload([:creator, options: :votes])
+        |> compute_poll_results()
+    end
+  end
+
+  defp compute_poll_results(poll) do
+    total_votes =
+      poll.options
+      |> Enum.map(fn opt -> length(opt.votes) end)
+      |> Enum.sum()
+
+    options_with_counts =
+      Enum.map(poll.options, fn option ->
+        vote_count = length(option.votes)
+        percentage = if total_votes > 0, do: round(vote_count / total_votes * 100), else: 0
+        voter_ids = if poll.anonymous, do: [], else: Enum.map(option.votes, & &1.user_id)
+
+        %{option | vote_count: vote_count, percentage: percentage, voter_ids: voter_ids}
+      end)
+
+    %{poll | options: options_with_counts, total_votes: total_votes}
+  end
+
+  @doc """
+  Casts a vote on a poll option.
+  For single-choice polls, removes any existing vote first.
+  Returns {:ok, poll} or {:error, reason}.
+  """
+  def vote_on_poll(poll_id, option_id, user_id) do
+    poll = Repo.get!(Poll, poll_id)
+
+    cond do
+      poll.closed_at != nil ->
+        {:error, :poll_closed}
+
+      not poll.allow_multiple ->
+        # Single choice: remove existing vote first
+        from(v in PollVote, where: v.poll_id == ^poll_id and v.user_id == ^user_id)
+        |> Repo.delete_all()
+
+        insert_vote(poll_id, option_id, user_id)
+
+      true ->
+        # Multiple choice: check if already voted for this option
+        existing =
+          from(v in PollVote,
+            where: v.poll_id == ^poll_id and v.poll_option_id == ^option_id and v.user_id == ^user_id
+          )
+          |> Repo.one()
+
+        if existing do
+          # Toggle off - remove vote
+          Repo.delete(existing)
+          poll = get_poll!(poll_id)
+          broadcast_poll_updated(poll)
+          {:ok, poll}
+        else
+          insert_vote(poll_id, option_id, user_id)
+        end
+    end
+  end
+
+  defp insert_vote(poll_id, option_id, user_id) do
+    %PollVote{}
+    |> PollVote.changeset(%{
+      poll_id: poll_id,
+      poll_option_id: option_id,
+      user_id: user_id
+    })
+    |> Repo.insert()
+    |> case do
+      {:ok, _vote} ->
+        poll = get_poll!(poll_id)
+        broadcast_poll_updated(poll)
+        {:ok, poll}
+
+      {:error, changeset} ->
+        {:error, changeset}
+    end
+  end
+
+  @doc """
+  Removes a user's vote from a poll option.
+  Returns {:ok, poll} or {:error, reason}.
+  """
+  def remove_vote(poll_id, option_id, user_id) do
+    poll = Repo.get!(Poll, poll_id)
+
+    if poll.closed_at != nil do
+      {:error, :poll_closed}
+    else
+      from(v in PollVote,
+        where: v.poll_id == ^poll_id and v.poll_option_id == ^option_id and v.user_id == ^user_id
+      )
+      |> Repo.delete_all()
+
+      poll = get_poll!(poll_id)
+      broadcast_poll_updated(poll)
+      {:ok, poll}
+    end
+  end
+
+  @doc """
+  Closes a poll to prevent further voting.
+  Only the creator can close a poll.
+  Returns {:ok, poll} or {:error, reason}.
+  """
+  def close_poll(poll_id, user_id) do
+    poll = Repo.get!(Poll, poll_id)
+
+    cond do
+      poll.creator_id != user_id ->
+        {:error, :not_creator}
+
+      poll.closed_at != nil ->
+        {:error, :already_closed}
+
+      true ->
+        poll
+        |> Poll.close_changeset(%{closed_at: DateTime.utc_now() |> DateTime.truncate(:second)})
+        |> Repo.update()
+        |> case do
+          {:ok, _} ->
+            poll = get_poll!(poll_id)
+            broadcast_poll_updated(poll)
+            {:ok, poll}
+
+          error ->
+            error
+        end
+    end
+  end
+
+  @doc """
+  Lists all polls in a conversation with results computed.
+  Returns polls ordered by most recent first.
+  """
+  def list_conversation_polls(conversation_id) do
+    from(p in Poll,
+      where: p.conversation_id == ^conversation_id,
+      order_by: [desc: p.inserted_at],
+      preload: [:creator, options: :votes]
+    )
+    |> Repo.all()
+    |> Enum.map(&compute_poll_results/1)
+  end
+
+  @doc """
+  Gets the IDs of options a user has voted for in a poll.
+  Returns a MapSet of option IDs.
+  """
+  def get_user_poll_votes(poll_id, user_id) do
+    from(v in PollVote,
+      where: v.poll_id == ^poll_id and v.user_id == ^user_id,
+      select: v.poll_option_id
+    )
+    |> Repo.all()
+    |> MapSet.new()
+  end
+
+  @doc """
+  Gets a map of poll_id => MapSet of voted option IDs for a user.
+  Useful for bulk loading vote status for multiple polls.
+  """
+  def get_user_votes_for_polls(poll_ids, user_id) when is_list(poll_ids) do
+    from(v in PollVote,
+      where: v.poll_id in ^poll_ids and v.user_id == ^user_id,
+      select: {v.poll_id, v.poll_option_id}
+    )
+    |> Repo.all()
+    |> Enum.group_by(fn {poll_id, _} -> poll_id end, fn {_, option_id} -> option_id end)
+    |> Enum.into(%{}, fn {poll_id, option_ids} -> {poll_id, MapSet.new(option_ids)} end)
+  end
+
+  def get_user_votes_for_polls(_, _), do: %{}
+
+  defp broadcast_poll_created(conversation_id, poll) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:poll_created, poll}
+    )
+  end
+
+  defp broadcast_poll_updated(poll) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{poll.conversation_id}",
+      {:poll_updated, poll}
+    )
   end
 end
