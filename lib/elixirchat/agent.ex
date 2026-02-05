@@ -303,6 +303,9 @@ defmodule Elixirchat.Agent do
   def send_agent_message(conversation_id, content) do
     agent = get_or_create_agent_user()
 
+    # Broadcast that agent is done processing
+    Chat.broadcast_agent_processing(conversation_id, false)
+
     case Chat.send_message(conversation_id, agent.id, content) do
       {:ok, message} ->
         {:ok, message}

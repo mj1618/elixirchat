@@ -108,3 +108,10 @@ Solution: Use fully qualified function calls like `Phoenix.Component.assign(...)
 Run the Phoenix server with: `mix phx.server`
 
 Port: 4000 (default)
+
+### Environment Variables
+
+The following environment variables are required for full functionality:
+
+- `OPENAI_API_KEY` - Required for the @agent chat assistant
+- `TAVILY_API_KEY` - Required for web search capability (get free key at https://tavily.com)

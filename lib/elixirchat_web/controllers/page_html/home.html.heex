@@ -34,8 +34,12 @@
         then start chatting with friends through direct messages or group chats.
       </p>
       <div class="flex gap-4 justify-center">
-        <.link navigate={~p"/signup"} class="btn btn-primary btn-lg">Sign Up</.link>
-        <.link navigate={~p"/login"} class="btn btn-outline btn-lg">Login</.link>
+        <%= if @current_user do %>
+          <.link navigate={~p"/chats"} class="btn btn-primary btn-lg">Go to Chats</.link>
+        <% else %>
+          <.link navigate={~p"/signup"} class="btn btn-primary btn-lg">Sign Up</.link>
+          <.link navigate={~p"/login"} class="btn btn-outline btn-lg">Login</.link>
+        <% end %>
       </div>
       <div class="mt-4">
         <Layouts.theme_toggle />

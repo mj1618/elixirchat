@@ -18,6 +18,18 @@ To enable the AI agent feature, set your OpenAI API key:
 fly secrets set OPENAI_API_KEY=sk-your-key-here --app elixirchat
 ```
 
+### Task: Set TAVILY_API_KEY for Web Search - DONE
+
+The AI agent's web search feature requires a Tavily API key. Get a free key at https://tavily.com then set it:
+
+```bash
+# For production (Fly.io)
+fly secrets set TAVILY_API_KEY=tvly-your-key-here --app elixirchat
+
+# For local development
+export TAVILY_API_KEY=tvly-your-key-here
+```
+
 ---
 
 ## Useful Commands

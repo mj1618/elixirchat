@@ -3,22 +3,42 @@ tasks:
   # planner:
   #   prompt: planner
   #   iterations: 50
-  coder:
-    prompt: coder
+  # coder:
+  #   prompt: coder
+  #   iterations: 50
+
+  # coder2:
+  #   prompt: coder
+  #   iterations: 50
+
+  # coder3:
+  #   prompt: coder
+  #   iterations: 50
+
+  # coder4:
+  #   prompt: coder
+  #   iterations: 50
+
+  # coder5:
+  #   prompt: coder
+  #   iterations: 50
+
+  tester:
+    prompt: tester
     iterations: 50
 
-  coder2:
-    prompt: coder
+  tester2:
+    prompt: tester
     iterations: 50
 
-  coder3:
-    prompt: coder
+  tester3:
+    prompt: tester
     iterations: 50
 
-  coder4:
-    prompt: coder
+  tester4:
+    prompt: tester
     iterations: 50
 
-  coder5:
-    prompt: coder
+  tester5:
+    prompt: tester
     iterations: 50

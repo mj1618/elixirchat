@@ -20,7 +20,10 @@ defmodule ElixirchatWeb.Plugs.Auth do
   end
 
   @doc """
-  LiveView on_mount callback for ensuring authentication.
+  LiveView on_mount callback for authentication.
+
+  - `:ensure_authenticated` - Requires a logged-in user, redirects to /login if not authenticated
+  - `:mount_current_user` - Assigns current_user if present, but doesn't require authentication
   """
   def on_mount(:ensure_authenticated, _params, session, socket) do
     user_id = session["user_id"]
@@ -31,6 +34,12 @@ defmodule ElixirchatWeb.Plugs.Auth do
     else
       {:halt, Phoenix.LiveView.redirect(socket, to: "/login")}
     end
+  end
+
+  def on_mount(:mount_current_user, _params, session, socket) do
+    user_id = session["user_id"]
+    user = user_id && Accounts.get_user(user_id)
+    {:cont, Phoenix.Component.assign(socket, current_user: user)}
   end
 
   @doc """

@@ -1,15 +1,16 @@
 defmodule Elixirchat.Agent.WebSearch do
   @moduledoc """
-  Module for performing web searches using DuckDuckGo's instant answer API.
+  Module for performing web searches using Tavily's AI-optimized search API.
+  Tavily is specifically designed for AI agents and returns LLM-ready results.
   """
 
   require Logger
 
-  @api_url "https://api.duckduckgo.com/"
-  @timeout 10_000
+  @api_url "https://api.tavily.com/search"
+  @timeout 15_000
 
   @doc """
-  Performs a web search using DuckDuckGo's instant answer API.
+  Performs a web search using Tavily's search API.
 
   Returns `{:ok, results_text}` or `{:error, reason}`.
 
@@ -20,130 +21,78 @@ defmodule Elixirchat.Agent.WebSearch do
 
   """
   def search(query) when is_binary(query) and byte_size(query) > 0 do
-    params = [
-      q: query,
-      format: "json",
-      no_html: "1",
-      skip_disambig: "1"
-    ]
+    api_key = get_api_key()
 
-    url = "#{@api_url}?#{URI.encode_query(params)}"
+    if is_nil(api_key) or api_key == "" do
+      Logger.warning("Tavily API key not configured, web search unavailable")
+      {:error, :api_key_missing}
+    else
+      body = %{
+        query: query,
+        search_depth: "basic",
+        include_answer: true,
+        max_results: 5
+      }
 
-    case Req.get(url, receive_timeout: @timeout) do
-      {:ok, %{status: 200, body: body}} when is_map(body) ->
-        {:ok, format_results(query, body)}
+      headers = [
+        {"Authorization", "Bearer #{api_key}"},
+        {"Content-Type", "application/json"}
+      ]
 
-      {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        # Try to decode if body is still a string
-        case Jason.decode(body) do
-          {:ok, decoded} -> {:ok, format_results(query, decoded)}
-          {:error, _} -> {:error, :invalid_response}
-        end
+      case Req.post(@api_url, json: body, headers: headers, receive_timeout: @timeout) do
+        {:ok, %{status: 200, body: response}} when is_map(response) ->
+          {:ok, format_results(query, response)}
 
-      {:ok, %{status: status}} ->
-        Logger.error("DuckDuckGo API error: status=#{status}")
-        {:error, {:api_error, status}}
+        {:ok, %{status: 401}} ->
+          Logger.error("Tavily API: Invalid API key")
+          {:error, :invalid_api_key}
 
-      {:error, reason} ->
-        Logger.error("DuckDuckGo API request failed: #{inspect(reason)}")
-        {:error, {:request_failed, reason}}
+        {:ok, %{status: 429}} ->
+          Logger.warning("Tavily API: Rate limited")
+          {:error, :rate_limited}
+
+        {:ok, %{status: status, body: body}} ->
+          Logger.error("Tavily API error: status=#{status}, body=#{inspect(body)}")
+          {:error, {:api_error, status}}
+
+        {:error, reason} ->
+          Logger.error("Tavily API request failed: #{inspect(reason)}")
+          {:error, {:request_failed, reason}}
+      end
     end
   end
 
   def search(_), do: {:error, :invalid_query}
 
   @doc """
-  Formats the DuckDuckGo API response into readable text.
+  Formats the Tavily API response into readable text for the LLM.
   """
   def format_results(query, response) do
     parts = []
 
-    # Add the abstract (main answer)
+    # Add the AI-generated answer if available (most valuable part)
     parts =
-      case Map.get(response, "Abstract", "") do
-        abstract when is_binary(abstract) and byte_size(abstract) > 0 ->
-          source = Map.get(response, "AbstractSource", "")
-          url = Map.get(response, "AbstractURL", "")
-
-          abstract_text =
-            if source != "" and url != "" do
-              "#{abstract}\n(Source: #{source} - #{url})"
-            else
-              abstract
-            end
-
-          [abstract_text | parts]
-
-        _ ->
-          parts
-      end
-
-    # Add instant answer if available
-    parts =
-      case Map.get(response, "Answer", "") do
+      case Map.get(response, "answer") do
         answer when is_binary(answer) and byte_size(answer) > 0 ->
-          ["Answer: #{answer}" | parts]
+          ["## Summary\n#{answer}" | parts]
 
         _ ->
           parts
       end
 
-    # Add definition if available
+    # Add individual search results
     parts =
-      case Map.get(response, "Definition", "") do
-        definition when is_binary(definition) and byte_size(definition) > 0 ->
-          source = Map.get(response, "DefinitionSource", "")
-
-          def_text =
-            if source != "" do
-              "Definition: #{definition} (#{source})"
-            else
-              "Definition: #{definition}"
-            end
-
-          [def_text | parts]
-
-        _ ->
-          parts
-      end
-
-    # Add related topics (limit to top 5)
-    parts =
-      case Map.get(response, "RelatedTopics", []) do
-        topics when is_list(topics) and length(topics) > 0 ->
-          related =
-            topics
+      case Map.get(response, "results", []) do
+        results when is_list(results) and length(results) > 0 ->
+          formatted_results =
+            results
             |> Enum.take(5)
-            |> Enum.map(&extract_topic_text/1)
+            |> Enum.map(&format_result/1)
             |> Enum.reject(&is_nil/1)
-            |> Enum.join("\n- ")
+            |> Enum.join("\n\n")
 
-          if related != "" do
-            ["Related:\n- #{related}" | parts]
-          else
-            parts
-          end
-
-        _ ->
-          parts
-      end
-
-    # Add infobox data if available
-    parts =
-      case Map.get(response, "Infobox") do
-        %{"content" => content} when is_list(content) and length(content) > 0 ->
-          info =
-            content
-            |> Enum.take(5)
-            |> Enum.map(fn
-              %{"label" => label, "value" => value} -> "#{label}: #{value}"
-              _ -> nil
-            end)
-            |> Enum.reject(&is_nil/1)
-            |> Enum.join("\n")
-
-          if info != "" do
-            ["Info:\n#{info}" | parts]
+          if formatted_results != "" do
+            ["## Sources\n#{formatted_results}" | parts]
           else
             parts
           end
@@ -155,33 +104,33 @@ defmodule Elixirchat.Agent.WebSearch do
     result = parts |> Enum.reverse() |> Enum.join("\n\n")
 
     if result == "" do
-      "No detailed information found for '#{query}'. The search did not return specific results. Try rephrasing or searching for something more specific."
+      "No search results found for '#{query}'. Try rephrasing your query or searching for something more specific."
     else
       result
     end
   end
 
-  defp extract_topic_text(%{"Text" => text}) when is_binary(text) and byte_size(text) > 0 do
-    # Truncate long texts
-    if String.length(text) > 200 do
-      String.slice(text, 0, 200) <> "..."
-    else
-      text
-    end
+  defp format_result(%{"title" => title, "url" => url, "content" => content})
+       when is_binary(title) and is_binary(url) and is_binary(content) do
+    # Truncate content if too long
+    truncated_content =
+      if String.length(content) > 500 do
+        String.slice(content, 0, 500) <> "..."
+      else
+        content
+      end
+
+    "**#{title}**\n#{truncated_content}\nSource: #{url}"
   end
 
-  defp extract_topic_text(%{"Topics" => topics}) when is_list(topics) do
-    # Handle nested topic groups
-    topics
-    |> Enum.take(2)
-    |> Enum.map(&extract_topic_text/1)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join("; ")
-    |> case do
-      "" -> nil
-      text -> text
-    end
+  defp format_result(%{"title" => title, "url" => url}) when is_binary(title) and is_binary(url) do
+    "**#{title}**\nSource: #{url}"
   end
 
-  defp extract_topic_text(_), do: nil
+  defp format_result(_), do: nil
+
+  defp get_api_key do
+    Application.get_env(:elixirchat, :tavily)[:api_key] ||
+      System.get_env("TAVILY_API_KEY")
+  end
 end

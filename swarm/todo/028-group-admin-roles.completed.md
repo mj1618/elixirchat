@@ -1,5 +1,33 @@
 # Task: Group Admin Roles
 
+## Completion Notes (Agent ceefbe20)
+
+Implemented group admin roles feature with the following changes:
+
+1. **Migration** (`priv/repo/migrations/20260205054850_add_role_to_conversation_members.exs`):
+   - Added `role` field to conversation_members table (default: "member")
+   - Data migration to set oldest member as owner for existing groups
+
+2. **Schema** (`lib/elixirchat/chat/conversation_member.ex`):
+   - Added `role` field with validation for "owner", "admin", "member"
+   - Added `role_changeset/2` for role updates
+
+3. **Chat Context** (`lib/elixirchat/chat.ex`):
+   - Updated `create_group_conversation` to set first member as owner
+   - Updated `list_group_members` to return members with roles, sorted by role priority
+   - Added admin functions: `kick_member/3`, `promote_to_admin/3`, `demote_from_admin/3`, `transfer_ownership/3`
+   - Added helper functions: `get_member_role/2`, `is_admin_or_owner?/2`
+   - Updated `can_leave_group?` to check for owner (must transfer first)
+   - Added PubSub broadcast functions for role changes
+
+4. **ChatLive** (`lib/elixirchat_web/live/chat_live.ex`):
+   - Added role badges (Owner/Admin) in member list
+   - Added admin controls dropdown (kick, promote, demote, transfer)
+   - Added event handlers for all admin actions
+   - Added PubSub handlers for real-time role updates
+   - Updated leave group UI to warn owners they must transfer first
+   - Added transfer ownership confirmation dialog
+
 ## Description
 Add admin/owner roles to group conversations to enable member management. Currently, groups have no concept of ownership or admin privileges. The user who creates a group should become the owner and have the ability to remove (kick) other members, promote members to admin, and transfer ownership. This is a foundational feature for proper group management.
 

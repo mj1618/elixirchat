@@ -28,6 +28,11 @@ config :elixirchat, :openai,
   api_key: System.get_env("OPENAI_API_KEY"),
   model: System.get_env("OPENAI_MODEL", "gpt-4o-mini")
 
+# Tavily API configuration for web search
+# Get your free API key at https://tavily.com
+config :elixirchat, :tavily,
+  api_key: System.get_env("TAVILY_API_KEY")
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
@@ -64,6 +69,12 @@ if config_env() == :prod do
 
   config :elixirchat, ElixirchatWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
+    check_origin: [
+      "https://elixirchat.dev",
+      "https://www.elixirchat.dev",
+      "https://elixirchat.fly.dev",
+      "https://#{host}"
+    ],
     http: [
       # Enable IPv6 and bind on all interfaces.
       # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
