@@ -47,7 +47,8 @@ defmodule ElixirchatWeb.ChatLive do
          edit_content: "",
          show_delete_modal: false,
          delete_message_id: nil,
-         reaction_picker_message_id: nil
+         reaction_picker_message_id: nil,
+         replying_to: nil
        )}
     else
       {:ok, redirect(socket, to: "/chats") |> put_flash(:error, "Access denied")}
@@ -586,12 +587,22 @@ defmodule ElixirchatWeb.ChatLive do
                 {message.content}
               </div>
 
-              <%!-- Edit/Delete action buttons (visible on hover) --%>
-              <div
-                :if={can_modify_message?(message, @current_user.id)}
-                class="absolute -top-2 right-0 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1"
-              >
+              <%!-- Action buttons (visible on hover) --%>
+              <div class="absolute -top-2 right-0 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                <%!-- Reaction button --%>
                 <button
+                  phx-click="show_reaction_picker"
+                  phx-value-message-id={message.id}
+                  class="btn btn-ghost btn-xs btn-circle bg-base-100 shadow-sm"
+                  title="Add reaction"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.182 15.182a4.5 4.5 0 0 1-6.364 0M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM9.75 9.75c0 .414-.168.75-.375.75S9 10.164 9 9.75 9.168 9 9.375 9s.375.336.375.75Zm-.375 0h.008v.015h-.008V9.75Zm5.625 0c0 .414-.168.75-.375.75s-.375-.336-.375-.75.168-.75.375-.75.375.336.375.75Zm-.375 0h.008v.015h-.008V9.75Z" />
+                  </svg>
+                </button>
+                <%!-- Edit/Delete buttons (only for own messages within time limit) --%>
+                <button
+                  :if={can_modify_message?(message, @current_user.id)}
                   phx-click="start_edit"
                   phx-value-id={message.id}
                   class="btn btn-ghost btn-xs btn-circle bg-base-100 shadow-sm"
@@ -602,6 +613,7 @@ defmodule ElixirchatWeb.ChatLive do
                   </svg>
                 </button>
                 <button
+                  :if={can_modify_message?(message, @current_user.id)}
                   phx-click="show_delete_modal"
                   phx-value-id={message.id}
                   class="btn btn-ghost btn-xs btn-circle bg-base-100 shadow-sm text-error"
@@ -612,6 +624,40 @@ defmodule ElixirchatWeb.ChatLive do
                   </svg>
                 </button>
               </div>
+
+              <%!-- Reaction picker popup --%>
+              <div
+                :if={@reaction_picker_message_id == message.id}
+                class="absolute z-20 bg-base-100 shadow-lg rounded-lg p-2 flex gap-1 border border-base-300 -bottom-12 right-0"
+              >
+                <button
+                  :for={emoji <- Reaction.allowed_emojis()}
+                  phx-click="toggle_reaction"
+                  phx-value-message-id={message.id}
+                  phx-value-emoji={emoji}
+                  class="btn btn-ghost btn-sm text-lg hover:scale-125 transition-transform px-1"
+                >
+                  {emoji}
+                </button>
+              </div>
+            </div>
+
+            <%!-- Reactions display below message --%>
+            <div :if={map_size(Map.get(message, :reactions_grouped, %{})) > 0} class="chat-footer flex flex-wrap gap-1 mt-1">
+              <button
+                :for={{emoji, reactors} <- Map.get(message, :reactions_grouped, %{})}
+                phx-click="toggle_reaction"
+                phx-value-message-id={message.id}
+                phx-value-emoji={emoji}
+                class={[
+                  "btn btn-xs gap-1",
+                  user_has_reacted?(@current_user.id, reactors) && "btn-primary" || "btn-ghost border border-base-300"
+                ]}
+                title={format_reactor_names(reactors)}
+              >
+                <span>{emoji}</span>
+                <span class="text-xs">{length(reactors)}</span>
+              </button>
             </div>
           </div>
         </div>
@@ -671,7 +717,9 @@ defmodule ElixirchatWeb.ChatLive do
   end
 
   defp within_time_limit?(message) do
-    minutes_since = DateTime.diff(DateTime.utc_now(), message.inserted_at, :minute)
+    # Convert NaiveDateTime to DateTime for comparison
+    inserted_at_datetime = DateTime.from_naive!(message.inserted_at, "Etc/UTC")
+    minutes_since = DateTime.diff(DateTime.utc_now(), inserted_at_datetime, :minute)
     minutes_since <= Chat.edit_delete_time_limit_minutes()
   end
 
@@ -764,5 +812,23 @@ defmodule ElixirchatWeb.ChatLive do
 
   defp get_online_count(members, online_user_ids) do
     Enum.count(members, fn m -> m.id in online_user_ids end)
+  end
+
+  # Reaction helpers
+  defp user_has_reacted?(user_id, reactors) do
+    Enum.any?(reactors, fn user -> user.id == user_id end)
+  end
+
+  defp format_reactor_names(reactors) do
+    case reactors do
+      [] ->
+        ""
+
+      users when length(users) <= 5 ->
+        Enum.map_join(users, ", ", & &1.username)
+
+      [u1, u2, u3, u4, u5 | rest] ->
+        "#{u1.username}, #{u2.username}, #{u3.username}, #{u4.username}, #{u5.username} and #{length(rest)} more"
+    end
   end
 end

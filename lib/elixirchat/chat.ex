@@ -127,7 +127,7 @@ defmodule Elixirchat.Chat do
   end
 
   @doc """
-  Lists messages in a conversation with reactions loaded.
+  Lists messages in a conversation with reactions and reply_to loaded.
   """
   def list_messages(conversation_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
@@ -137,7 +137,7 @@ defmodule Elixirchat.Chat do
       from m in Message,
         where: m.conversation_id == ^conversation_id,
         order_by: [asc: m.inserted_at],
-        preload: [:sender]
+        preload: [:sender, reply_to: :sender]
 
     query =
       if before_id do
@@ -163,15 +163,36 @@ defmodule Elixirchat.Chat do
 
   @doc """
   Sends a message in a conversation.
+  Accepts optional opts with :reply_to_id for replying to a specific message.
   """
-  def send_message(conversation_id, sender_id, content) do
+  def send_message(conversation_id, sender_id, content, opts \\ []) do
+    reply_to_id = Keyword.get(opts, :reply_to_id)
+
+    # Validate reply_to if provided
+    if reply_to_id do
+      reply_to = Repo.get(Message, reply_to_id)
+      if is_nil(reply_to) or reply_to.conversation_id != conversation_id do
+        {:error, :invalid_reply_to}
+      else
+        do_send_message(conversation_id, sender_id, content, reply_to_id)
+      end
+    else
+      do_send_message(conversation_id, sender_id, content, nil)
+    end
+  end
+
+  defp do_send_message(conversation_id, sender_id, content, reply_to_id) do
+    attrs = %{
+      content: content,
+      conversation_id: conversation_id,
+      sender_id: sender_id
+    }
+
+    attrs = if reply_to_id, do: Map.put(attrs, :reply_to_id, reply_to_id), else: attrs
+
     result =
       %Message{}
-      |> Message.changeset(%{
-        content: content,
-        conversation_id: conversation_id,
-        sender_id: sender_id
-      })
+      |> Message.changeset(attrs)
       |> Repo.insert()
 
     case result do
@@ -181,10 +202,10 @@ defmodule Elixirchat.Chat do
         |> Ecto.Changeset.change(%{updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)})
         |> Repo.update()
 
-        # Preload sender for the response and add empty reactions
+        # Preload sender and reply_to for the response, add empty reactions
         message =
           message
-          |> Repo.preload(:sender)
+          |> Repo.preload([:sender, reply_to: :sender])
           |> Map.put(:reactions_grouped, %{})
 
         # Broadcast the message
