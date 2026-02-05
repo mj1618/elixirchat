@@ -2,7 +2,7 @@ defmodule ElixirchatWeb.ChatLive do
   use ElixirchatWeb, :live_view
 
   alias Elixirchat.Chat
-  alias Elixirchat.Chat.{Reaction, Mentions, Attachment}
+  alias Elixirchat.Chat.{Reaction, Attachment, Markdown}
   alias Elixirchat.Agent
   alias Elixirchat.Presence
 
@@ -593,6 +593,19 @@ defmodule ElixirchatWeb.ChatLive do
         MapSet.delete(users, message.sender.username)
       end)
 
+    # Send browser notification if message is from another user
+    socket =
+      if message.sender_id != socket.assigns.current_user.id do
+        push_event(socket, "notify", %{
+          sender: message.sender.username,
+          message: truncate_for_notification(message.content),
+          conversation_id: message.conversation_id,
+          conversation_name: get_conversation_name(socket.assigns.conversation, socket.assigns.current_user.id)
+        })
+      else
+        socket
+      end
+
     {:noreply, update(socket, :messages, fn messages -> messages ++ [message] end)}
   end
 
@@ -905,8 +918,8 @@ defmodule ElixirchatWeb.ChatLive do
                 get_bubble_class(message, @current_user.id)
               ]}>
                 <%!-- Only show text content if it's not just "[Attachment]" --%>
-                <span :if={message.content != "[Attachment]"}>
-                  <%= raw(Mentions.render_with_mentions(message.content, @conversation.id)) %>
+                <span :if={message.content != "[Attachment]"} class="markdown-content">
+                  <%= raw(format_message_content(message.content, @members)) %>
                 </span>
 
                 <%!-- Attachment display --%>
@@ -925,6 +938,11 @@ defmodule ElixirchatWeb.ChatLive do
                       </a>
                     <% end %>
                   <% end %>
+                </div>
+
+                <%!-- Link previews display --%>
+                <div :if={length(Map.get(message, :link_previews, [])) > 0} class="mt-2 space-y-2">
+                  <.link_preview_card :for={preview <- message.link_previews} preview={preview} />
                 </div>
               </div>
 
@@ -1307,6 +1325,14 @@ defmodule ElixirchatWeb.ChatLive do
     String.slice(text, 0, max_length) <> "..."
   end
 
+  # Truncate message for browser notification
+  defp truncate_for_notification(nil), do: "[Attachment]"
+  defp truncate_for_notification("[Attachment]"), do: "[Attachment]"
+  defp truncate_for_notification(content) when byte_size(content) > 100 do
+    String.slice(content, 0, 100) <> "..."
+  end
+  defp truncate_for_notification(content), do: content
+
   # Read receipt helpers
 
   # Checks if message is read by the other user in a direct conversation
@@ -1362,5 +1388,47 @@ defmodule ElixirchatWeb.ChatLive do
   # Checks if user can unpin (is the pinner or message author)
   defp can_unpin?(user_id, pinned) do
     pinned.pinned_by_id == user_id || pinned.message.sender_id == user_id
+  end
+
+  # Link preview card component
+  defp link_preview_card(assigns) do
+    ~H"""
+    <a
+      href={@preview.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      class="block max-w-sm border border-base-300 rounded-lg overflow-hidden hover:bg-base-200 transition-colors bg-base-100"
+    >
+      <img
+        :if={@preview.image_url}
+        src={@preview.image_url}
+        alt=""
+        class="w-full h-32 object-cover"
+        loading="lazy"
+        onerror="this.style.display='none'"
+      />
+      <div class="p-3">
+        <div :if={@preview.site_name} class="text-xs text-base-content/60 mb-1">
+          {@preview.site_name}
+        </div>
+        <div :if={@preview.title} class="font-medium text-sm line-clamp-2">
+          {@preview.title}
+        </div>
+        <div :if={@preview.description} class="text-xs text-base-content/70 mt-1 line-clamp-2">
+          {truncate(@preview.description, 150)}
+        </div>
+      </div>
+    </a>
+    """
+  end
+
+  # Markdown/Mentions formatting helper
+  defp format_message_content(content, members) do
+    valid_usernames =
+      members
+      |> Enum.map(fn m -> String.downcase(m.username) end)
+      |> MapSet.new()
+
+    Markdown.render_with_mentions(content, valid_usernames)
   end
 end

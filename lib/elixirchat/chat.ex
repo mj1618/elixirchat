@@ -1027,4 +1027,70 @@ defmodule Elixirchat.Chat do
       event
     )
   end
+
+  # ===============================
+  # General Group Functions
+  # ===============================
+
+  @doc """
+  Gets the General conversation if it exists.
+  Returns nil if not found.
+  """
+  def get_general_conversation do
+    from(c in Conversation, where: c.is_general == true)
+    |> Repo.one()
+  end
+
+  @doc """
+  Gets or creates the General group conversation.
+  Creates it if it doesn't exist, returns it if it does.
+  """
+  def get_or_create_general_conversation do
+    case get_general_conversation() do
+      nil ->
+        {:ok, conversation} =
+          %Conversation{}
+          |> Conversation.changeset(%{type: "group", name: "General", is_general: true})
+          |> Repo.insert()
+
+        {:ok, conversation}
+
+      conversation ->
+        {:ok, conversation}
+    end
+  end
+
+  @doc """
+  Adds a user to the General group conversation.
+  This is idempotent - if the user is already a member, it does nothing.
+  Returns :ok on success, or {:error, reason} if the General group doesn't exist.
+  """
+  def add_user_to_general(user_id) do
+    case get_general_conversation() do
+      nil ->
+        # General group doesn't exist yet, try to create it first
+        case get_or_create_general_conversation() do
+          {:ok, conversation} ->
+            do_add_user_to_general(conversation.id, user_id)
+
+          error ->
+            error
+        end
+
+      conversation ->
+        do_add_user_to_general(conversation.id, user_id)
+    end
+  end
+
+  defp do_add_user_to_general(conversation_id, user_id) do
+    # Check if already a member
+    if member?(conversation_id, user_id) do
+      :ok
+    else
+      case add_member_to_group(conversation_id, user_id) do
+        {:ok, _} -> :ok
+        {:error, _} = error -> error
+      end
+    end
+  end
 end
