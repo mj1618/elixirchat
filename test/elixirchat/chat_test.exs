@@ -480,4 +480,115 @@ defmodule Elixirchat.ChatTest do
       assert message.sender.username == user1.username
     end
   end
+
+  describe "forward_message/4" do
+    test "forwards a message to another conversation" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      user3 = user_fixture()
+
+      {:ok, conversation1} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, conversation2} = Chat.create_direct_conversation(user1.id, user3.id)
+
+      {:ok, original_message} = Chat.send_message(conversation1.id, user1.id, "Hello from original!")
+
+      {:ok, forwarded_message} = Chat.forward_message(original_message.id, conversation2.id, user1.id)
+
+      assert forwarded_message.content == "Hello from original!"
+      assert forwarded_message.conversation_id == conversation2.id
+      assert forwarded_message.sender_id == user1.id
+      assert forwarded_message.forwarded_from_message_id == original_message.id
+      assert forwarded_message.forwarded_from_user_id == user1.id
+    end
+
+    test "preloads forwarded_from_user on forwarded message" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      user3 = user_fixture()
+
+      {:ok, conversation1} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, conversation2} = Chat.create_direct_conversation(user1.id, user3.id)
+
+      {:ok, original_message} = Chat.send_message(conversation1.id, user1.id, "Test message")
+
+      {:ok, forwarded_message} = Chat.forward_message(original_message.id, conversation2.id, user1.id)
+
+      # forwarded_from_user should be preloaded
+      assert forwarded_message.forwarded_from_user.id == user1.id
+      assert forwarded_message.forwarded_from_user.username == user1.username
+    end
+
+    test "returns error when forwarding deleted message" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      user3 = user_fixture()
+
+      {:ok, conversation1} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, conversation2} = Chat.create_direct_conversation(user1.id, user3.id)
+
+      {:ok, original_message} = Chat.send_message(conversation1.id, user1.id, "To be deleted")
+
+      # Mark message as deleted directly (avoiding time limit check in delete_message)
+      original_message
+      |> Ecto.Changeset.change(%{deleted_at: DateTime.utc_now() |> DateTime.truncate(:second)})
+      |> Elixirchat.Repo.update!()
+
+      assert {:error, :message_deleted} = Chat.forward_message(original_message.id, conversation2.id, user1.id)
+    end
+
+    test "returns error when sender is not a member of target conversation" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      user3 = user_fixture()
+      user4 = user_fixture()
+
+      {:ok, conversation1} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, conversation2} = Chat.create_direct_conversation(user3.id, user4.id)
+
+      {:ok, original_message} = Chat.send_message(conversation1.id, user1.id, "Cannot forward this")
+
+      # user1 is not a member of conversation2
+      assert {:error, :not_member} = Chat.forward_message(original_message.id, conversation2.id, user1.id)
+    end
+
+    test "allows forwarding message from another user" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      user3 = user_fixture()
+
+      {:ok, conversation1} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, conversation2} = Chat.create_direct_conversation(user2.id, user3.id)
+
+      # user1 sends original message
+      {:ok, original_message} = Chat.send_message(conversation1.id, user1.id, "Forward me!")
+
+      # user2 forwards user1's message to conversation2
+      {:ok, forwarded_message} = Chat.forward_message(original_message.id, conversation2.id, user2.id)
+
+      # The forwarded message should be sent by user2 but show it was originally from user1
+      assert forwarded_message.sender_id == user2.id
+      assert forwarded_message.forwarded_from_user_id == user1.id
+    end
+
+    test "broadcasts forwarded message to target conversation" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      user3 = user_fixture()
+
+      {:ok, conversation1} = Chat.create_direct_conversation(user1.id, user2.id)
+      {:ok, conversation2} = Chat.create_direct_conversation(user1.id, user3.id)
+
+      {:ok, original_message} = Chat.send_message(conversation1.id, user1.id, "To be forwarded")
+
+      # Subscribe to target conversation
+      :ok = Chat.subscribe(conversation2.id)
+
+      {:ok, forwarded_message} = Chat.forward_message(original_message.id, conversation2.id, user1.id)
+
+      # Should receive broadcast
+      assert_receive {:new_message, received_message}
+      assert received_message.id == forwarded_message.id
+      assert received_message.forwarded_from_message_id == original_message.id
+    end
+  end
 end

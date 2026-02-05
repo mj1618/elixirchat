@@ -6,7 +6,7 @@ defmodule Elixirchat.Chat do
   import Ecto.Query, warn: false
 
   alias Elixirchat.Repo
-  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt, Attachment, Mentions, PinnedMessage, LinkPreview, MessageLinkPreview, UrlExtractor, LinkPreviewFetcher, MutedConversation, StarredMessage, Poll, PollOption, PollVote, GroupInvite}
+  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt, Attachment, Mentions, PinnedMessage, LinkPreview, MessageLinkPreview, UrlExtractor, LinkPreviewFetcher, MutedConversation, StarredMessage, Poll, PollOption, PollVote, GroupInvite, ScheduledMessage, ThreadReply}
   alias Elixirchat.Accounts.User
   alias Elixirchat.Agent
 
@@ -264,10 +264,10 @@ defmodule Elixirchat.Chat do
         |> Ecto.Changeset.change(%{updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)})
         |> Repo.update()
 
-        # Preload sender, reply_to, attachments, and link_previews for the response, add empty reactions
+        # Preload sender, reply_to, attachments, link_previews, and forwarded_from_user for the response, add empty reactions
         message =
           message
-          |> Repo.preload([:sender, :attachments, :link_previews, reply_to: :sender], force: true)
+          |> Repo.preload([:sender, :attachments, :link_previews, :forwarded_from_user, reply_to: :sender], force: true)
           |> Map.put(:reactions_grouped, %{})
 
         # Broadcast the message
@@ -524,7 +524,7 @@ defmodule Elixirchat.Chat do
 
   @doc """
   Creates a group conversation with a name and initial members.
-  The creator is automatically added as a member.
+  The first member (creator) is automatically made the owner.
   """
   def create_group_conversation(name, member_ids) when is_list(member_ids) and length(member_ids) >= 1 do
     Repo.transaction(fn ->
@@ -534,11 +534,28 @@ defmodule Elixirchat.Chat do
         |> Conversation.changeset(%{type: "group", name: name})
         |> Repo.insert()
 
-      # Add all members
-      Enum.each(member_ids, fn user_id ->
+      # Add all members - first member is the owner (creator)
+      [creator_id | other_ids] = member_ids
+
+      # Add creator as owner
+      {:ok, _} =
+        %ConversationMember{}
+        |> ConversationMember.changeset(%{
+          conversation_id: conversation.id,
+          user_id: creator_id,
+          role: "owner"
+        })
+        |> Repo.insert()
+
+      # Add other members as regular members
+      Enum.each(other_ids, fn user_id ->
         {:ok, _} =
           %ConversationMember{}
-          |> ConversationMember.changeset(%{conversation_id: conversation.id, user_id: user_id})
+          |> ConversationMember.changeset(%{
+            conversation_id: conversation.id,
+            user_id: user_id,
+            role: "member"
+          })
           |> Repo.insert()
       end)
 
@@ -586,6 +603,18 @@ defmodule Elixirchat.Chat do
   end
 
   @doc """
+  Gets the role of a member in a conversation.
+  Returns the role string ("owner", "admin", "member") or nil if not a member.
+  """
+  def get_member_role(conversation_id, user_id) do
+    from(m in ConversationMember,
+      where: m.conversation_id == ^conversation_id and m.user_id == ^user_id,
+      select: m.role
+    )
+    |> Repo.one()
+  end
+
+  @doc """
   Removes a user from a group conversation (or allows a user to leave).
   """
   def remove_member_from_group(conversation_id, user_id) do
@@ -608,7 +637,7 @@ defmodule Elixirchat.Chat do
   @doc """
   Checks if a user can leave a group conversation.
   Returns :ok or {:error, reason}.
-  Reasons: :not_a_group, :cannot_leave_general, :not_a_member
+  Reasons: :not_a_group, :cannot_leave_general, :not_a_member, :owner_must_transfer
   """
   def can_leave_group?(conversation_id, user_id) do
     conversation = Repo.get!(Conversation, conversation_id)
@@ -617,6 +646,7 @@ defmodule Elixirchat.Chat do
       conversation.type != "group" -> {:error, :not_a_group}
       conversation.is_general == true -> {:error, :cannot_leave_general}
       !member?(conversation_id, user_id) -> {:error, :not_a_member}
+      get_member_role(conversation_id, user_id) == "owner" -> {:error, :owner_must_transfer}
       true -> :ok
     end
   end
@@ -652,6 +682,184 @@ defmodule Elixirchat.Chat do
     )
   end
 
+  # ===============================
+  # Group Admin Functions
+  # ===============================
+
+  @doc """
+  Checks if a user is an admin or owner of a conversation.
+  """
+  def is_admin_or_owner?(conversation_id, user_id) do
+    get_member_role(conversation_id, user_id) in ["owner", "admin"]
+  end
+
+  @doc """
+  Kicks (removes) a member from a group conversation.
+  Only admins and owners can kick members.
+  Owners can kick anyone, admins can only kick regular members.
+
+  Returns :ok or {:error, reason}.
+  """
+  def kick_member(conversation_id, kicker_id, target_id) do
+    with :ok <- validate_kick_permission(conversation_id, kicker_id, target_id),
+         {:ok, _} <- remove_member_from_group(conversation_id, target_id) do
+      broadcast_member_kicked(conversation_id, target_id, kicker_id)
+      :ok
+    end
+  end
+
+  defp validate_kick_permission(conversation_id, kicker_id, target_id) do
+    kicker_role = get_member_role(conversation_id, kicker_id)
+    target_role = get_member_role(conversation_id, target_id)
+
+    cond do
+      kicker_id == target_id -> {:error, :cannot_kick_self}
+      kicker_role == nil -> {:error, :not_a_member}
+      target_role == nil -> {:error, :target_not_a_member}
+      kicker_role == "member" -> {:error, :not_authorized}
+      target_role == "owner" -> {:error, :cannot_kick_owner}
+      kicker_role == "admin" and target_role == "admin" -> {:error, :cannot_kick_admin}
+      true -> :ok
+    end
+  end
+
+  @doc """
+  Broadcasts that a member was kicked from a conversation.
+  """
+  def broadcast_member_kicked(conversation_id, user_id, kicker_id) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:member_kicked, %{user_id: user_id, kicked_by_id: kicker_id}}
+    )
+  end
+
+  @doc """
+  Promotes a member to admin role.
+  Only the owner can promote members to admin.
+
+  Returns {:ok, member} or {:error, reason}.
+  """
+  def promote_to_admin(conversation_id, promoter_id, target_id) do
+    with :ok <- validate_promote_permission(conversation_id, promoter_id, target_id),
+         member when not is_nil(member) <- get_membership(conversation_id, target_id),
+         {:ok, updated} <- update_member_role(member, "admin") do
+      broadcast_role_change(conversation_id, target_id, "admin")
+      {:ok, updated}
+    else
+      nil -> {:error, :target_not_a_member}
+      error -> error
+    end
+  end
+
+  defp validate_promote_permission(conversation_id, promoter_id, target_id) do
+    promoter_role = get_member_role(conversation_id, promoter_id)
+    target_role = get_member_role(conversation_id, target_id)
+
+    cond do
+      promoter_id == target_id -> {:error, :cannot_promote_self}
+      promoter_role != "owner" -> {:error, :not_owner}
+      target_role == nil -> {:error, :target_not_a_member}
+      target_role == "owner" -> {:error, :cannot_promote_owner}
+      target_role == "admin" -> {:error, :already_admin}
+      true -> :ok
+    end
+  end
+
+  @doc """
+  Demotes an admin back to regular member.
+  Only the owner can demote admins.
+
+  Returns {:ok, member} or {:error, reason}.
+  """
+  def demote_from_admin(conversation_id, demoter_id, target_id) do
+    with :ok <- validate_demote_permission(conversation_id, demoter_id, target_id),
+         member when not is_nil(member) <- get_membership(conversation_id, target_id),
+         {:ok, updated} <- update_member_role(member, "member") do
+      broadcast_role_change(conversation_id, target_id, "member")
+      {:ok, updated}
+    else
+      nil -> {:error, :target_not_a_member}
+      error -> error
+    end
+  end
+
+  defp validate_demote_permission(conversation_id, demoter_id, target_id) do
+    demoter_role = get_member_role(conversation_id, demoter_id)
+    target_role = get_member_role(conversation_id, target_id)
+
+    cond do
+      demoter_id == target_id -> {:error, :cannot_demote_self}
+      demoter_role != "owner" -> {:error, :not_owner}
+      target_role == nil -> {:error, :target_not_a_member}
+      target_role != "admin" -> {:error, :not_an_admin}
+      true -> :ok
+    end
+  end
+
+  @doc """
+  Transfers ownership of a group to another member.
+  The current owner becomes an admin after transfer.
+
+  Returns :ok or {:error, reason}.
+  """
+  def transfer_ownership(conversation_id, owner_id, new_owner_id) do
+    with :ok <- validate_transfer_permission(conversation_id, owner_id, new_owner_id) do
+      Repo.transaction(fn ->
+        # Demote current owner to admin
+        old_owner = get_membership(conversation_id, owner_id)
+        {:ok, _} = update_member_role(old_owner, "admin")
+
+        # Promote new owner
+        new_owner = get_membership(conversation_id, new_owner_id)
+        {:ok, _} = update_member_role(new_owner, "owner")
+      end)
+
+      broadcast_ownership_transferred(conversation_id, owner_id, new_owner_id)
+      :ok
+    end
+  end
+
+  defp validate_transfer_permission(conversation_id, owner_id, new_owner_id) do
+    owner_role = get_member_role(conversation_id, owner_id)
+    new_owner_role = get_member_role(conversation_id, new_owner_id)
+
+    cond do
+      owner_id == new_owner_id -> {:error, :same_user}
+      owner_role != "owner" -> {:error, :not_owner}
+      new_owner_role == nil -> {:error, :target_not_a_member}
+      true -> :ok
+    end
+  end
+
+  defp update_member_role(member, new_role) do
+    member
+    |> ConversationMember.role_changeset(%{role: new_role})
+    |> Repo.update()
+  end
+
+  @doc """
+  Broadcasts that a member's role has changed.
+  """
+  def broadcast_role_change(conversation_id, user_id, new_role) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:role_changed, %{user_id: user_id, new_role: new_role}}
+    )
+  end
+
+  @doc """
+  Broadcasts that ownership was transferred.
+  """
+  def broadcast_ownership_transferred(conversation_id, old_owner_id, new_owner_id) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:ownership_transferred, %{old_owner_id: old_owner_id, new_owner_id: new_owner_id}}
+    )
+  end
+
   @doc """
   Updates the name of a group conversation.
   """
@@ -668,15 +876,23 @@ defmodule Elixirchat.Chat do
   end
 
   @doc """
-  Lists all members of a conversation.
+  Lists all members of a conversation with their roles.
+  Returns a list of maps with user and role info.
   """
   def list_group_members(conversation_id) do
     from(m in ConversationMember,
       where: m.conversation_id == ^conversation_id,
-      preload: [:user]
+      preload: [:user],
+      order_by: [
+        fragment("CASE WHEN role = 'owner' THEN 0 WHEN role = 'admin' THEN 1 ELSE 2 END"),
+        asc: m.inserted_at
+      ]
     )
     |> Repo.all()
-    |> Enum.map(& &1.user)
+    |> Enum.map(fn m ->
+      # Return user with role attached for display
+      Map.put(m.user, :role, m.role)
+    end)
   end
 
   @doc """
@@ -1952,4 +2168,474 @@ defmodule Elixirchat.Chat do
       {:poll_updated, poll}
     )
   end
+
+  # ===============================
+  # Group Invite Functions
+  # ===============================
+
+  @doc """
+  Creates a group invite link for a conversation.
+  Only works for group conversations (not direct messages or the General group).
+  Revokes any existing invite for the group before creating a new one.
+
+  Returns {:ok, invite} or {:error, reason}.
+  Errors: :not_a_group, :cannot_invite_to_general, :not_a_member
+  """
+  def create_group_invite(conversation_id, user_id, opts \\ []) do
+    conversation = get_conversation!(conversation_id)
+
+    cond do
+      conversation.type != "group" ->
+        {:error, :not_a_group}
+
+      conversation.is_general == true ->
+        {:error, :cannot_invite_to_general}
+
+      !member?(conversation_id, user_id) ->
+        {:error, :not_a_member}
+
+      true ->
+        # Revoke any existing invite first (one active invite per group)
+        revoke_existing_invite(conversation_id)
+
+        attrs = %{
+          token: GroupInvite.generate_token(),
+          conversation_id: conversation_id,
+          created_by_id: user_id,
+          expires_at: Keyword.get(opts, :expires_at),
+          max_uses: Keyword.get(opts, :max_uses)
+        }
+
+        %GroupInvite{}
+        |> GroupInvite.changeset(attrs)
+        |> Repo.insert()
+    end
+  end
+
+  @doc """
+  Gets an invite by its token with conversation and creator preloaded.
+  Returns nil if not found.
+  """
+  def get_invite_by_token(token) do
+    Repo.get_by(GroupInvite, token: token)
+    |> Repo.preload([:conversation, :created_by])
+  end
+
+  @doc """
+  Gets the active invite for a group conversation.
+  Returns nil if no invite exists.
+  """
+  def get_group_invite(conversation_id) do
+    from(i in GroupInvite,
+      where: i.conversation_id == ^conversation_id,
+      order_by: [desc: i.inserted_at],
+      limit: 1,
+      preload: [:created_by]
+    )
+    |> Repo.one()
+  end
+
+  @doc """
+  Checks if an invite is still valid (not expired and not at max uses).
+  """
+  def is_invite_valid?(invite) do
+    cond do
+      is_nil(invite) -> false
+      invite.expires_at && DateTime.compare(DateTime.utc_now(), invite.expires_at) == :gt -> false
+      invite.max_uses && invite.use_count >= invite.max_uses -> false
+      true -> true
+    end
+  end
+
+  @doc """
+  Uses an invite to join a group.
+  Adds the user to the group and increments the use count.
+
+  Returns {:ok, conversation} or {:error, reason}.
+  Errors: :invalid_invite, :already_member
+  """
+  def use_invite(token, user_id) do
+    invite = get_invite_by_token(token)
+
+    cond do
+      !is_invite_valid?(invite) ->
+        {:error, :invalid_invite}
+
+      member?(invite.conversation_id, user_id) ->
+        {:error, :already_member}
+
+      true ->
+        # Add user to group
+        case add_member_to_group(invite.conversation_id, user_id) do
+          {:ok, member} ->
+            # Increment use count
+            invite
+            |> GroupInvite.changeset(%{use_count: invite.use_count + 1})
+            |> Repo.update()
+
+            # Broadcast member added
+            broadcast_member_added(invite.conversation_id, member)
+            {:ok, invite.conversation}
+
+          error ->
+            error
+        end
+    end
+  end
+
+  @doc """
+  Revokes all invites for a conversation.
+  Only members can revoke invites.
+
+  Returns :ok or {:error, :not_a_member}.
+  """
+  def revoke_invite(conversation_id, user_id) do
+    if member?(conversation_id, user_id) do
+      from(i in GroupInvite, where: i.conversation_id == ^conversation_id)
+      |> Repo.delete_all()
+      :ok
+    else
+      {:error, :not_a_member}
+    end
+  end
+
+  defp revoke_existing_invite(conversation_id) do
+    from(i in GroupInvite, where: i.conversation_id == ^conversation_id)
+    |> Repo.delete_all()
+  end
+
+  # ===============================
+  # Scheduled Message Functions
+  # ===============================
+
+  @doc """
+  Schedules a message to be sent at a future time.
+  Returns {:ok, scheduled_message} or {:error, reason}.
+  """
+  def schedule_message(conversation_id, sender_id, content, scheduled_for, opts \\ []) do
+    if member?(conversation_id, sender_id) do
+      reply_to_id = Keyword.get(opts, :reply_to_id)
+
+      attrs = %{
+        content: content,
+        scheduled_for: scheduled_for,
+        conversation_id: conversation_id,
+        sender_id: sender_id,
+        reply_to_id: reply_to_id
+      }
+
+      %ScheduledMessage{}
+      |> ScheduledMessage.changeset(attrs)
+      |> Repo.insert()
+    else
+      {:error, :not_a_member}
+    end
+  end
+
+  @doc """
+  Gets a scheduled message by ID.
+  """
+  def get_scheduled_message!(id) do
+    ScheduledMessage
+    |> Repo.get!(id)
+    |> Repo.preload([:sender, :conversation, :reply_to])
+  end
+
+  @doc """
+  Gets a scheduled message by ID, returns nil if not found.
+  """
+  def get_scheduled_message(id) do
+    case Repo.get(ScheduledMessage, id) do
+      nil -> nil
+      msg -> Repo.preload(msg, [:sender, :conversation, :reply_to])
+    end
+  end
+
+  @doc """
+  Lists all pending scheduled messages for a user (not sent or cancelled).
+  Ordered by scheduled time ascending.
+  """
+  def list_user_scheduled_messages(user_id) do
+    from(s in ScheduledMessage,
+      where: s.sender_id == ^user_id,
+      where: is_nil(s.sent_at) and is_nil(s.cancelled_at),
+      order_by: [asc: s.scheduled_for],
+      preload: [conversation: [members: :user]]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Lists pending scheduled messages in a conversation for a user.
+  Only returns the user's own scheduled messages in that conversation.
+  """
+  def list_conversation_scheduled_messages(conversation_id, user_id) do
+    from(s in ScheduledMessage,
+      where: s.conversation_id == ^conversation_id,
+      where: s.sender_id == ^user_id,
+      where: is_nil(s.sent_at) and is_nil(s.cancelled_at),
+      order_by: [asc: s.scheduled_for]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Gets the count of pending scheduled messages for a user.
+  """
+  def get_scheduled_message_count(user_id) do
+    from(s in ScheduledMessage,
+      where: s.sender_id == ^user_id,
+      where: is_nil(s.sent_at) and is_nil(s.cancelled_at)
+    )
+    |> Repo.aggregate(:count)
+  end
+
+  @doc """
+  Updates a scheduled message's content and/or scheduled time.
+  Only works if the message hasn't been sent or cancelled.
+  Returns {:ok, scheduled_message} or {:error, reason}.
+  """
+  def update_scheduled_message(scheduled_message_id, user_id, attrs) do
+    case Repo.get(ScheduledMessage, scheduled_message_id) do
+      nil ->
+        {:error, :not_found}
+
+      %{sender_id: ^user_id, sent_at: nil, cancelled_at: nil} = msg ->
+        msg
+        |> ScheduledMessage.update_changeset(attrs)
+        |> Repo.update()
+
+      %{sent_at: sent_at} when not is_nil(sent_at) ->
+        {:error, :already_sent}
+
+      %{cancelled_at: cancelled_at} when not is_nil(cancelled_at) ->
+        {:error, :already_cancelled}
+
+      _ ->
+        {:error, :not_owner}
+    end
+  end
+
+  @doc """
+  Cancels a scheduled message (soft delete via cancelled_at).
+  Only the sender can cancel their own scheduled messages.
+  Returns {:ok, scheduled_message} or {:error, reason}.
+  """
+  def cancel_scheduled_message(scheduled_message_id, user_id) do
+    case Repo.get(ScheduledMessage, scheduled_message_id) do
+      nil ->
+        {:error, :not_found}
+
+      %{sender_id: ^user_id, sent_at: nil, cancelled_at: nil} = msg ->
+        msg
+        |> ScheduledMessage.cancel_changeset(%{cancelled_at: DateTime.utc_now()})
+        |> Repo.update()
+
+      %{sent_at: sent_at} when not is_nil(sent_at) ->
+        {:error, :already_sent}
+
+      %{cancelled_at: cancelled_at} when not is_nil(cancelled_at) ->
+        {:error, :already_cancelled}
+
+      _ ->
+        {:error, :not_owner}
+    end
+  end
+
+  @doc """
+  Gets all scheduled messages that are due to be sent.
+  Returns messages where scheduled_for <= now and not sent/cancelled.
+  """
+  def get_due_scheduled_messages do
+    now = DateTime.utc_now()
+
+    from(s in ScheduledMessage,
+      where: s.scheduled_for <= ^now,
+      where: is_nil(s.sent_at) and is_nil(s.cancelled_at),
+      preload: [:sender]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Sends a scheduled message by creating the actual message and marking as sent.
+  Called by the ScheduledMessageWorker when a message is due.
+  Returns {:ok, message} or {:error, reason}.
+  """
+  def send_scheduled_message(scheduled_message) do
+    opts = if scheduled_message.reply_to_id, do: [reply_to_id: scheduled_message.reply_to_id], else: []
+
+    case send_message(scheduled_message.conversation_id, scheduled_message.sender_id, scheduled_message.content, opts) do
+      {:ok, message} ->
+        # Mark scheduled message as sent
+        scheduled_message
+        |> ScheduledMessage.sent_changeset(%{sent_at: DateTime.utc_now()})
+        |> Repo.update()
+
+        {:ok, message}
+
+      error ->
+        error
+    end
+  end
+
+  # ===============================
+  # Thread Reply Functions
+  # ===============================
+
+  @doc """
+  Creates a thread reply to a message.
+  If also_send_to_channel is true, also creates a regular message in the conversation.
+
+  Returns {:ok, thread_reply} or {:error, reason}.
+  Errors: :invalid_message, :message_deleted, :not_a_member
+  """
+  def create_thread_reply(parent_message_id, user_id, content, opts \\ []) do
+    also_send = Keyword.get(opts, :also_send_to_channel, false)
+
+    case Repo.get(Message, parent_message_id) do
+      nil ->
+        {:error, :invalid_message}
+
+      %{deleted_at: deleted_at} when not is_nil(deleted_at) ->
+        {:error, :message_deleted}
+
+      message ->
+        if member?(message.conversation_id, user_id) do
+          result =
+            %ThreadReply{}
+            |> ThreadReply.changeset(%{
+              parent_message_id: parent_message_id,
+              user_id: user_id,
+              content: content,
+              also_sent_to_channel: also_send
+            })
+            |> Repo.insert()
+
+          case result do
+            {:ok, reply} ->
+              reply = Repo.preload(reply, [:user])
+              broadcast_thread_reply(parent_message_id, reply)
+
+              # Broadcast thread count update to conversation
+              count = get_thread_reply_count(parent_message_id)
+              broadcast_thread_count_update(message.conversation_id, parent_message_id, count)
+
+              # Optionally also send to the main channel
+              if also_send do
+                send_message(message.conversation_id, user_id, content)
+              end
+
+              {:ok, reply}
+
+            error ->
+              error
+          end
+        else
+          {:error, :not_a_member}
+        end
+    end
+  end
+
+  @doc """
+  Lists all thread replies for a parent message, ordered by creation time.
+  """
+  def list_thread_replies(parent_message_id) do
+    from(r in ThreadReply,
+      where: r.parent_message_id == ^parent_message_id,
+      order_by: [asc: r.inserted_at],
+      preload: [:user]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Gets the count of thread replies for a message.
+  """
+  def get_thread_reply_count(parent_message_id) do
+    from(r in ThreadReply, where: r.parent_message_id == ^parent_message_id)
+    |> Repo.aggregate(:count)
+  end
+
+  @doc """
+  Batch gets thread reply counts for a list of message IDs.
+  Returns a map of message_id => count.
+  """
+  def get_thread_reply_counts(message_ids) when is_list(message_ids) do
+    from(r in ThreadReply,
+      where: r.parent_message_id in ^message_ids,
+      group_by: r.parent_message_id,
+      select: {r.parent_message_id, count(r.id)}
+    )
+    |> Repo.all()
+    |> Enum.into(%{})
+  end
+
+  def get_thread_reply_counts(_), do: %{}
+
+  @doc """
+  Gets the parent message for a thread with sender preloaded.
+  """
+  def get_thread_parent_message!(parent_message_id) do
+    Message
+    |> Repo.get!(parent_message_id)
+    |> Repo.preload([:sender, :attachments])
+  end
+
+  @doc """
+  Subscribes to thread updates for a specific message thread.
+  """
+  def subscribe_to_thread(parent_message_id) do
+    Phoenix.PubSub.subscribe(Elixirchat.PubSub, "thread:#{parent_message_id}")
+  end
+
+  @doc """
+  Unsubscribes from thread updates.
+  """
+  def unsubscribe_from_thread(parent_message_id) do
+    Phoenix.PubSub.unsubscribe(Elixirchat.PubSub, "thread:#{parent_message_id}")
+  end
+
+  @doc """
+  Broadcasts a new thread reply to thread subscribers.
+  """
+  def broadcast_thread_reply(parent_message_id, reply) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "thread:#{parent_message_id}",
+      {:new_thread_reply, reply}
+    )
+  end
+
+  @doc """
+  Broadcasts thread count update to conversation subscribers.
+  """
+  def broadcast_thread_count_update(conversation_id, message_id, count) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:thread_count_updated, %{message_id: message_id, count: count}}
+    )
+  end
+
+  @doc """
+  Searches thread replies for matching content.
+  Used for including thread replies in message search results.
+  """
+  def search_thread_replies(conversation_id, query) when is_binary(query) and byte_size(query) >= 2 do
+    escaped_query = escape_like_query(query)
+    search_term = "%#{escaped_query}%"
+
+    from(r in ThreadReply,
+      join: m in Message, on: r.parent_message_id == m.id,
+      where: m.conversation_id == ^conversation_id,
+      where: ilike(r.content, ^search_term),
+      order_by: [desc: r.inserted_at],
+      limit: 20,
+      preload: [:user, parent_message: :sender]
+    )
+    |> Repo.all()
+  end
+
+  def search_thread_replies(_, _), do: []
 end

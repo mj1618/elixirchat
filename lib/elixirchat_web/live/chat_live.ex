@@ -18,6 +18,10 @@ defmodule ElixirchatWeb.ChatLive do
       messages = Chat.list_messages(conversation_id)
       members = Chat.list_group_members(conversation_id)
       pinned_messages = Chat.list_pinned_messages(conversation_id)
+
+      # Load thread reply counts for all messages
+      message_ids_for_threads = Enum.map(messages, & &1.id)
+      thread_reply_counts = Chat.get_thread_reply_counts(message_ids_for_threads)
       is_conversation_pinned = Chat.is_conversation_pinned?(conversation_id, current_user.id)
       is_muted = Chat.is_muted?(conversation_id, current_user.id)
       is_archived = Chat.is_archived?(conversation_id, current_user.id)
@@ -25,6 +29,7 @@ defmodule ElixirchatWeb.ChatLive do
       polls = Chat.list_conversation_polls(conversation_id)
       poll_ids = Enum.map(polls, & &1.id)
       user_poll_votes = Chat.get_user_votes_for_polls(poll_ids, current_user.id)
+      current_user_role = Chat.get_member_role(conversation_id, current_user.id)
 
       # Load read receipts for all messages
       message_ids = Enum.map(messages, & &1.id)
@@ -109,7 +114,22 @@ defmodule ElixirchatWeb.ChatLive do
         user_poll_votes: user_poll_votes,
         show_poll_modal: false,
         poll_question: "",
-        poll_options: ["", ""]
+        poll_options: ["", ""],
+        show_invite_modal: false,
+        invite_link: nil,
+        current_user_role: current_user_role,
+        show_member_menu: nil,
+        show_transfer_confirm: false,
+        transfer_target_id: nil,
+        show_schedule_modal: false,
+        schedule_datetime: nil,
+        scheduled_message_count: Chat.get_scheduled_message_count(current_user.id),
+        # Thread support
+        thread_reply_counts: thread_reply_counts,
+        show_thread: false,
+        thread_parent_message: nil,
+        thread_replies: [],
+        thread_input: ""
        )}
     else
       {:ok, redirect(socket, to: "/chats") |> put_flash(:error, "Access denied")}
@@ -264,11 +284,159 @@ defmodule ElixirchatWeb.ChatLive do
          socket
          |> put_flash(:error, "You cannot leave the General group")
          |> assign(show_leave_confirm: false)}
+      {:error, :owner_must_transfer} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "You must transfer ownership before leaving the group")
+         |> assign(show_leave_confirm: false)}
       {:error, _} ->
         {:noreply,
          socket
          |> put_flash(:error, "Could not leave the group")
          |> assign(show_leave_confirm: false)}
+    end
+  end
+
+  # ===============================
+  # Group Admin Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("show_member_menu", %{"user-id" => user_id}, socket) do
+    {:noreply, assign(socket, show_member_menu: String.to_integer(user_id))}
+  end
+
+  @impl true
+  def handle_event("hide_member_menu", _, socket) do
+    {:noreply, assign(socket, show_member_menu: nil)}
+  end
+
+  @impl true
+  def handle_event("kick_member", %{"user-id" => user_id}, socket) do
+    target_id = String.to_integer(user_id)
+    conversation_id = socket.assigns.conversation.id
+    kicker_id = socket.assigns.current_user.id
+
+    case Chat.kick_member(conversation_id, kicker_id, target_id) do
+      :ok ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Member removed from the group")
+         |> assign(show_member_menu: nil)}
+      {:error, :not_authorized} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "You don't have permission to remove this member")
+         |> assign(show_member_menu: nil)}
+      {:error, :cannot_kick_owner} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Cannot remove the group owner")
+         |> assign(show_member_menu: nil)}
+      {:error, :cannot_kick_admin} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Admins cannot remove other admins")
+         |> assign(show_member_menu: nil)}
+      {:error, _} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Could not remove member")
+         |> assign(show_member_menu: nil)}
+    end
+  end
+
+  @impl true
+  def handle_event("promote_member", %{"user-id" => user_id}, socket) do
+    target_id = String.to_integer(user_id)
+    conversation_id = socket.assigns.conversation.id
+    promoter_id = socket.assigns.current_user.id
+
+    case Chat.promote_to_admin(conversation_id, promoter_id, target_id) do
+      {:ok, _} ->
+        members = Chat.list_group_members(conversation_id)
+        {:noreply,
+         socket
+         |> put_flash(:info, "Member promoted to admin")
+         |> assign(members: members, show_member_menu: nil)}
+      {:error, :not_owner} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Only the owner can promote members to admin")
+         |> assign(show_member_menu: nil)}
+      {:error, :already_admin} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "This member is already an admin")
+         |> assign(show_member_menu: nil)}
+      {:error, _} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Could not promote member")
+         |> assign(show_member_menu: nil)}
+    end
+  end
+
+  @impl true
+  def handle_event("demote_member", %{"user-id" => user_id}, socket) do
+    target_id = String.to_integer(user_id)
+    conversation_id = socket.assigns.conversation.id
+    demoter_id = socket.assigns.current_user.id
+
+    case Chat.demote_from_admin(conversation_id, demoter_id, target_id) do
+      {:ok, _} ->
+        members = Chat.list_group_members(conversation_id)
+        {:noreply,
+         socket
+         |> put_flash(:info, "Admin demoted to member")
+         |> assign(members: members, show_member_menu: nil)}
+      {:error, :not_owner} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Only the owner can demote admins")
+         |> assign(show_member_menu: nil)}
+      {:error, _} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Could not demote admin")
+         |> assign(show_member_menu: nil)}
+    end
+  end
+
+  @impl true
+  def handle_event("show_transfer_confirm", %{"user-id" => user_id}, socket) do
+    {:noreply, assign(socket, show_transfer_confirm: true, transfer_target_id: String.to_integer(user_id), show_member_menu: nil)}
+  end
+
+  @impl true
+  def handle_event("cancel_transfer", _, socket) do
+    {:noreply, assign(socket, show_transfer_confirm: false, transfer_target_id: nil)}
+  end
+
+  @impl true
+  def handle_event("transfer_ownership", _, socket) do
+    conversation_id = socket.assigns.conversation.id
+    owner_id = socket.assigns.current_user.id
+    new_owner_id = socket.assigns.transfer_target_id
+
+    case Chat.transfer_ownership(conversation_id, owner_id, new_owner_id) do
+      :ok ->
+        members = Chat.list_group_members(conversation_id)
+        current_user_role = Chat.get_member_role(conversation_id, owner_id)
+        {:noreply,
+         socket
+         |> put_flash(:info, "Ownership transferred successfully")
+         |> assign(members: members, current_user_role: current_user_role, show_transfer_confirm: false, transfer_target_id: nil)}
+      {:error, :not_owner} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "You are not the owner of this group")
+         |> assign(show_transfer_confirm: false, transfer_target_id: nil)}
+      {:error, _} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Could not transfer ownership")
+         |> assign(show_transfer_confirm: false, transfer_target_id: nil)}
     end
   end
 
@@ -517,6 +685,203 @@ defmodule ElixirchatWeb.ChatLive do
     user_poll_votes = Map.put(socket.assigns.user_poll_votes, updated_poll.id, user_votes)
 
     assign(socket, polls: polls, user_poll_votes: user_poll_votes)
+  end
+
+  # ===============================
+  # Group Invite Link Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("show_invite_modal", _, socket) do
+    invite = Chat.get_group_invite(socket.assigns.conversation.id)
+    invite_link = if invite && Chat.is_invite_valid?(invite) do
+      ElixirchatWeb.Endpoint.url() <> "/join/#{invite.token}"
+    end
+
+    {:noreply, assign(socket, show_invite_modal: true, invite_link: invite_link)}
+  end
+
+  @impl true
+  def handle_event("close_invite_modal", _, socket) do
+    {:noreply, assign(socket, show_invite_modal: false)}
+  end
+
+  @impl true
+  def handle_event("create_invite", _, socket) do
+    case Chat.create_group_invite(socket.assigns.conversation.id, socket.assigns.current_user.id) do
+      {:ok, invite} ->
+        invite_link = ElixirchatWeb.Endpoint.url() <> "/join/#{invite.token}"
+        {:noreply,
+         socket
+         |> assign(invite_link: invite_link)
+         |> put_flash(:info, "Invite link created")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not create invite")}
+    end
+  end
+
+  @impl true
+  def handle_event("regenerate_invite", _, socket) do
+    # Revoke existing and create new
+    Chat.revoke_invite(socket.assigns.conversation.id, socket.assigns.current_user.id)
+
+    case Chat.create_group_invite(socket.assigns.conversation.id, socket.assigns.current_user.id) do
+      {:ok, invite} ->
+        invite_link = ElixirchatWeb.Endpoint.url() <> "/join/#{invite.token}"
+        {:noreply,
+         socket
+         |> assign(invite_link: invite_link)
+         |> put_flash(:info, "New invite link generated")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not regenerate invite")}
+    end
+  end
+
+  @impl true
+  def handle_event("show_schedule_modal", _, socket) do
+    {:noreply, assign(socket, show_schedule_modal: true)}
+  end
+
+  @impl true
+  def handle_event("close_schedule_modal", _, socket) do
+    {:noreply, assign(socket, show_schedule_modal: false)}
+  end
+
+  @impl true
+  def handle_event("schedule_message", %{"content" => content, "scheduled_for" => scheduled_for_str}, socket) do
+    content = String.trim(content)
+
+    if content == "" do
+      {:noreply, put_flash(socket, :error, "Message cannot be empty")}
+    else
+      # Parse the datetime-local input (which is in local time, we treat as UTC for simplicity)
+      case NaiveDateTime.from_iso8601(scheduled_for_str <> ":00") do
+        {:ok, naive_dt} ->
+          scheduled_for = DateTime.from_naive!(naive_dt, "Etc/UTC")
+
+          # Verify it's at least 1 minute in the future
+          if DateTime.compare(scheduled_for, DateTime.add(DateTime.utc_now(), 60, :second)) == :lt do
+            {:noreply, put_flash(socket, :error, "Scheduled time must be at least 1 minute in the future")}
+          else
+            opts =
+              if socket.assigns.replying_to do
+                [reply_to_id: socket.assigns.replying_to.id]
+              else
+                []
+              end
+
+            case Chat.schedule_message(
+              socket.assigns.conversation.id,
+              socket.assigns.current_user.id,
+              content,
+              scheduled_for,
+              opts
+            ) do
+              {:ok, _scheduled_message} ->
+                {:noreply,
+                 socket
+                 |> assign(
+                   show_schedule_modal: false,
+                   message_input: "",
+                   replying_to: nil,
+                   scheduled_message_count: socket.assigns.scheduled_message_count + 1
+                 )
+                 |> push_event("clear-input", %{id: "message-input"})
+                 |> put_flash(:info, "Message scheduled successfully")}
+
+              {:error, :not_a_member} ->
+                {:noreply, put_flash(socket, :error, "You are not a member of this conversation")}
+
+              {:error, changeset} when is_struct(changeset, Ecto.Changeset) ->
+                errors = Ecto.Changeset.traverse_errors(changeset, fn {msg, _} -> msg end)
+                error_msg = errors |> Enum.map(fn {k, v} -> "#{k}: #{Enum.join(v, ", ")}" end) |> Enum.join("; ")
+                {:noreply, put_flash(socket, :error, "Failed to schedule: #{error_msg}")}
+
+              {:error, _} ->
+                {:noreply, put_flash(socket, :error, "Failed to schedule message")}
+            end
+          end
+
+        {:error, _} ->
+          {:noreply, put_flash(socket, :error, "Invalid date/time format")}
+      end
+    end
+  end
+
+  # ===============================
+  # Thread Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("open_thread", %{"message-id" => message_id}, socket) do
+    message_id = String.to_integer(message_id)
+    parent_message = Chat.get_thread_parent_message!(message_id)
+    replies = Chat.list_thread_replies(message_id)
+
+    # Subscribe to thread updates
+    if connected?(socket) do
+      Chat.subscribe_to_thread(message_id)
+    end
+
+    {:noreply,
+     assign(socket,
+       show_thread: true,
+       thread_parent_message: parent_message,
+       thread_replies: replies,
+       thread_input: ""
+     )}
+  end
+
+  @impl true
+  def handle_event("close_thread", _, socket) do
+    # Unsubscribe from thread updates if we have a parent message
+    if socket.assigns.thread_parent_message && connected?(socket) do
+      Chat.unsubscribe_from_thread(socket.assigns.thread_parent_message.id)
+    end
+
+    {:noreply,
+     assign(socket,
+       show_thread: false,
+       thread_parent_message: nil,
+       thread_replies: [],
+       thread_input: ""
+     )}
+  end
+
+  @impl true
+  def handle_event("update_thread_input", %{"content" => content}, socket) do
+    {:noreply, assign(socket, thread_input: content)}
+  end
+
+  @impl true
+  def handle_event("send_thread_reply", %{"content" => content} = params, socket) do
+    content = String.trim(content)
+    also_send = params["also_send_to_channel"] == "true"
+
+    if content != "" and socket.assigns.thread_parent_message do
+      case Chat.create_thread_reply(
+        socket.assigns.thread_parent_message.id,
+        socket.assigns.current_user.id,
+        content,
+        also_send_to_channel: also_send
+      ) do
+        {:ok, _reply} ->
+          {:noreply, assign(socket, thread_input: "")}
+
+        {:error, :message_deleted} ->
+          {:noreply,
+           socket
+           |> put_flash(:error, "Cannot reply to a deleted message")
+           |> assign(show_thread: false)}
+
+        {:error, _} ->
+          {:noreply, put_flash(socket, :error, "Failed to send reply")}
+      end
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl true
@@ -1001,13 +1366,14 @@ defmodule ElixirchatWeb.ChatLive do
 
   @impl true
   def handle_info({:member_added, member}, socket) do
-    # Update members list with the new member
+    # Update members list with the new member (include role)
     {:noreply,
      update(socket, :members, fn members ->
        if Enum.any?(members, fn m -> m.id == member.user.id end) do
          members
        else
-         members ++ [member.user]
+         new_member = Map.put(member.user, :role, member.role || "member")
+         members ++ [new_member]
        end
      end)}
   end
@@ -1015,10 +1381,10 @@ defmodule ElixirchatWeb.ChatLive do
   @impl true
   def handle_info({:member_left, user_id}, socket) do
     if user_id == socket.assigns.current_user.id do
-      # Current user was removed (maybe kicked), redirect away
+      # Current user left, redirect away
       {:noreply,
        socket
-       |> put_flash(:info, "You have been removed from this group")
+       |> put_flash(:info, "You have left this group")
        |> push_navigate(to: ~p"/chats")}
     else
       # Someone else left, update members list
@@ -1027,6 +1393,89 @@ defmodule ElixirchatWeb.ChatLive do
          Enum.reject(members, fn m -> m.id == user_id end)
        end)}
     end
+  end
+
+  @impl true
+  def handle_info({:member_kicked, %{user_id: user_id}}, socket) do
+    if user_id == socket.assigns.current_user.id do
+      # Current user was kicked, redirect away
+      {:noreply,
+       socket
+       |> put_flash(:info, "You have been removed from this group")
+       |> push_navigate(to: ~p"/chats")}
+    else
+      # Someone else was kicked, update members list
+      {:noreply,
+       update(socket, :members, fn members ->
+         Enum.reject(members, fn m -> m.id == user_id end)
+       end)}
+    end
+  end
+
+  @impl true
+  def handle_info({:role_changed, %{user_id: user_id, new_role: new_role}}, socket) do
+    socket =
+      if user_id == socket.assigns.current_user.id do
+        assign(socket, current_user_role: new_role)
+      else
+        socket
+      end
+
+    {:noreply,
+     update(socket, :members, fn members ->
+       Enum.map(members, fn m ->
+         if m.id == user_id, do: Map.put(m, :role, new_role), else: m
+       end)
+     end)}
+  end
+
+  @impl true
+  def handle_info({:ownership_transferred, %{old_owner_id: old_owner_id, new_owner_id: new_owner_id}}, socket) do
+    current_user_id = socket.assigns.current_user.id
+
+    current_user_role =
+      cond do
+        current_user_id == new_owner_id -> "owner"
+        current_user_id == old_owner_id -> "admin"
+        true -> socket.assigns.current_user_role
+      end
+
+    {:noreply,
+     socket
+     |> assign(current_user_role: current_user_role)
+     |> update(:members, fn members ->
+       Enum.map(members, fn m ->
+         cond do
+           m.id == new_owner_id -> Map.put(m, :role, "owner")
+           m.id == old_owner_id -> Map.put(m, :role, "admin")
+           true -> m
+         end
+       end)
+     end)}
+  end
+
+  # ===============================
+  # Thread Handlers (handle_info)
+  # ===============================
+
+  @impl true
+  def handle_info({:new_thread_reply, reply}, socket) do
+    # Only update if we're viewing this thread
+    if socket.assigns.show_thread &&
+       socket.assigns.thread_parent_message &&
+       socket.assigns.thread_parent_message.id == reply.parent_message_id do
+      {:noreply, update(socket, :thread_replies, fn replies -> replies ++ [reply] end)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_info({:thread_count_updated, %{message_id: message_id, count: count}}, socket) do
+    {:noreply,
+     update(socket, :thread_reply_counts, fn counts ->
+       Map.put(counts, message_id, count)
+     end)}
   end
 
   # ===============================
@@ -1301,6 +1750,17 @@ defmodule ElixirchatWeb.ChatLive do
           <button phx-click="toggle_search" class="btn btn-ghost btn-sm" title="Search messages">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
               <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+            </svg>
+          </button>
+          <%!-- Invite link button (only for groups that are not General) --%>
+          <button
+            :if={@conversation.type == "group" && !@conversation.is_general}
+            phx-click="show_invite_modal"
+            class="btn btn-ghost btn-sm"
+            title="Get invite link"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
             </svg>
           </button>
           <div :if={@conversation.type == "group"} class="dropdown dropdown-end">
@@ -1609,7 +2069,7 @@ defmodule ElixirchatWeb.ChatLive do
 
             <%!-- Forwarded message indicator --%>
             <div
-              :if={message.forwarded_from_user}
+              :if={message.forwarded_from_user_id && message.forwarded_from_user}
               class="text-xs opacity-70 mb-1 flex items-center gap-1"
             >
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3 flex-shrink-0">
@@ -1687,6 +2147,18 @@ defmodule ElixirchatWeb.ChatLive do
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
+                  </svg>
+                </button>
+                <%!-- Reply in thread button --%>
+                <button
+                  :if={is_nil(message.deleted_at)}
+                  phx-click="open_thread"
+                  phx-value-message-id={message.id}
+                  class="btn btn-ghost btn-xs btn-circle bg-base-100 shadow-sm"
+                  title="Reply in thread"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
                   </svg>
                 </button>
                 <%!-- Forward button --%>
@@ -1791,6 +2263,20 @@ defmodule ElixirchatWeb.ChatLive do
               >
                 <span>{emoji}</span>
                 <span class="text-xs">{length(reactors)}</span>
+              </button>
+            </div>
+
+            <%!-- Thread reply count indicator --%>
+            <div :if={Map.get(@thread_reply_counts, message.id, 0) > 0 && is_nil(message.deleted_at)} class="chat-footer mt-1">
+              <button
+                phx-click="open_thread"
+                phx-value-message-id={message.id}
+                class="btn btn-ghost btn-xs gap-1 text-primary hover:bg-primary/10"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
+                </svg>
+                <span>{Map.get(@thread_reply_counts, message.id)} {if Map.get(@thread_reply_counts, message.id) == 1, do: "reply", else: "replies"}</span>
               </button>
             </div>
 
@@ -1986,6 +2472,11 @@ defmodule ElixirchatWeb.ChatLive do
                   <path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
                 </svg>
               </button>
+              <button type="button" phx-click="show_schedule_modal" class="btn btn-ghost btn-sm" title="Schedule message">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                </svg>
+              </button>
             </form>
           </div>
         </div>
@@ -2141,6 +2632,105 @@ defmodule ElixirchatWeb.ChatLive do
           </form>
         </div>
         <div class="modal-backdrop bg-base-content/50" phx-click="close_poll_modal"></div>
+      </div>
+
+      <%!-- Invite link modal --%>
+      <div :if={@show_invite_modal} class="modal modal-open">
+        <div class="modal-box">
+          <h3 class="font-bold text-lg mb-4">Invite Link</h3>
+
+          <div :if={@invite_link} class="space-y-4">
+            <div class="flex gap-2">
+              <input
+                type="text"
+                value={@invite_link}
+                readonly
+                class="input input-bordered flex-1 font-mono text-sm"
+                id="invite-link-input"
+              />
+              <button
+                phx-click={JS.dispatch("phx:copy", to: "#invite-link-input")}
+                class="btn btn-primary"
+                id="copy-invite-btn"
+                phx-hook="CopyToClipboard"
+              >
+                Copy
+              </button>
+            </div>
+
+            <p class="text-sm text-base-content/60">
+              Share this link with others to invite them to the group.
+            </p>
+
+            <button phx-click="regenerate_invite" class="btn btn-ghost btn-sm">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 mr-1">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+              </svg>
+              Regenerate Link
+            </button>
+          </div>
+
+          <div :if={!@invite_link}>
+            <p class="text-base-content/60 mb-4">No active invite link. Create one to invite others.</p>
+            <button phx-click="create_invite" class="btn btn-primary">
+              Create Invite Link
+            </button>
+          </div>
+
+          <div class="modal-action">
+            <button phx-click="close_invite_modal" class="btn btn-ghost">Close</button>
+          </div>
+        </div>
+        <div class="modal-backdrop bg-base-content/50" phx-click="close_invite_modal"></div>
+      </div>
+
+      <%!-- Schedule message modal --%>
+      <div :if={@show_schedule_modal} class="modal modal-open">
+        <div class="modal-box">
+          <h3 class="font-bold text-lg mb-4">Schedule Message</h3>
+
+          <form phx-submit="schedule_message" class="space-y-4">
+            <div>
+              <label class="label">
+                <span class="label-text">Message</span>
+              </label>
+              <textarea
+                name="content"
+                class="textarea textarea-bordered w-full"
+                rows="3"
+                placeholder="Enter your message..."
+                required
+              ><%= @message_input %></textarea>
+            </div>
+
+            <div>
+              <label class="label">
+                <span class="label-text">Schedule for</span>
+              </label>
+              <input
+                type="datetime-local"
+                name="scheduled_for"
+                class="input input-bordered w-full"
+                min={get_min_datetime()}
+                required
+              />
+              <label class="label">
+                <span class="label-text-alt">Minimum 1 minute from now</span>
+              </label>
+            </div>
+
+            <div class="modal-action">
+              <button type="button" phx-click="close_schedule_modal" class="btn btn-ghost">Cancel</button>
+              <button type="submit" class="btn btn-primary">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                </svg>
+                Schedule
+              </button>
+            </div>
+          </form>
+        </div>
+        <div class="modal-backdrop bg-base-content/50" phx-click="close_schedule_modal"></div>
       </div>
     </div>
     """
@@ -2399,5 +2989,16 @@ defmodule ElixirchatWeb.ChatLive do
       |> MapSet.new()
 
     Markdown.render_with_mentions(content, valid_usernames)
+  end
+
+  # Schedule helpers
+  defp get_min_datetime do
+    # Return datetime 1 minute from now in ISO format for datetime-local input
+    DateTime.utc_now()
+    |> DateTime.add(60, :second)
+    |> DateTime.to_naive()
+    |> NaiveDateTime.truncate(:minute)
+    |> NaiveDateTime.to_iso8601()
+    |> String.slice(0, 16)  # datetime-local format: YYYY-MM-DDTHH:MM
   end
 end
