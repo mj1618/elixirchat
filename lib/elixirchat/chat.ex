@@ -345,6 +345,31 @@ defmodule Elixirchat.Chat do
 
   def search_users(_, _), do: []
 
+  @doc """
+  Searches users by username who are NOT already members of a conversation.
+  Useful for adding new members to an existing group.
+  """
+  def search_users_not_in_conversation(query, conversation_id, limit \\ 10) when byte_size(query) > 0 do
+    existing_member_ids =
+      from(m in ConversationMember,
+        where: m.conversation_id == ^conversation_id,
+        select: m.user_id
+      )
+      |> Repo.all()
+
+    search_term = "%#{query}%"
+
+    from(u in User,
+      where: ilike(u.username, ^search_term),
+      where: u.id not in ^existing_member_ids,
+      limit: ^limit,
+      order_by: u.username
+    )
+    |> Repo.all()
+  end
+
+  def search_users_not_in_conversation(_, _, _), do: []
+
   # ===============================
   # Group Chat Functions
   # ===============================
@@ -382,12 +407,34 @@ defmodule Elixirchat.Chat do
     conversation = Repo.get!(Conversation, conversation_id)
 
     if conversation.type == "group" do
-      %ConversationMember{}
-      |> ConversationMember.changeset(%{conversation_id: conversation_id, user_id: user_id})
-      |> Repo.insert()
+      result =
+        %ConversationMember{}
+        |> ConversationMember.changeset(%{conversation_id: conversation_id, user_id: user_id})
+        |> Repo.insert()
+
+      case result do
+        {:ok, member} ->
+          # Preload the user for the broadcast
+          member = Repo.preload(member, :user)
+          {:ok, member}
+
+        error ->
+          error
+      end
     else
       {:error, :not_a_group}
     end
+  end
+
+  @doc """
+  Broadcasts that a new member was added to a conversation.
+  """
+  def broadcast_member_added(conversation_id, member) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:member_added, member}
+    )
   end
 
   @doc """
@@ -408,6 +455,53 @@ defmodule Elixirchat.Chat do
     else
       {:error, :not_a_group}
     end
+  end
+
+  @doc """
+  Checks if a user can leave a group conversation.
+  Returns :ok or {:error, reason}.
+  Reasons: :not_a_group, :cannot_leave_general, :not_a_member
+  """
+  def can_leave_group?(conversation_id, user_id) do
+    conversation = Repo.get!(Conversation, conversation_id)
+
+    cond do
+      conversation.type != "group" -> {:error, :not_a_group}
+      conversation.is_general == true -> {:error, :cannot_leave_general}
+      !member?(conversation_id, user_id) -> {:error, :not_a_member}
+      true -> :ok
+    end
+  end
+
+  @doc """
+  Allows a user to leave a group conversation.
+  Validates the leave is allowed, removes the member, and broadcasts the event.
+  Returns :ok or {:error, reason}.
+  """
+  def leave_group(conversation_id, user_id) do
+    case can_leave_group?(conversation_id, user_id) do
+      :ok ->
+        case remove_member_from_group(conversation_id, user_id) do
+          {:ok, _} ->
+            broadcast_member_left(conversation_id, user_id)
+            :ok
+          error ->
+            error
+        end
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Broadcasts that a member left a conversation.
+  """
+  def broadcast_member_left(conversation_id, user_id) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:member_left, user_id}
+    )
   end
 
   @doc """

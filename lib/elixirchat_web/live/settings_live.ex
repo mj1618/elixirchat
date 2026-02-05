@@ -9,13 +9,25 @@ defmodule ElixirchatWeb.SettingsLive do
     password_changeset = Accounts.change_user_password(current_user)
 
     {:ok,
-     assign(socket,
+     socket
+     |> allow_upload(:avatar,
+       accept: ~w(.jpg .jpeg .png .gif .webp),
+       max_entries: 1,
+       max_file_size: 2_000_000
+     )
+     |> assign(
        password_form: to_form(password_changeset, as: "password"),
        current_password: "",
        show_delete_modal: false,
        delete_confirmation: ""
      )}
   end
+
+  # Upload error helpers - must be defined before render for HEEx compilation
+  defp upload_error_to_string(:too_large), do: "File too large (max 2MB)"
+  defp upload_error_to_string(:too_many_files), do: "Only one file allowed"
+  defp upload_error_to_string(:not_accepted), do: "File type not allowed. Use JPEG, PNG, GIF, or WebP."
+  defp upload_error_to_string(err), do: "Upload error: #{inspect(err)}"
 
   @impl true
   def render(assigns) do
@@ -44,6 +56,60 @@ defmodule ElixirchatWeb.SettingsLive do
             Back
           </.link>
           <h1 class="text-2xl font-bold">Settings</h1>
+        </div>
+
+        <!-- Profile Picture Section -->
+        <div class="card bg-base-100 shadow-xl mb-6">
+          <div class="card-body">
+            <h2 class="card-title">Profile Picture</h2>
+
+            <div class="flex items-center gap-6">
+              <!-- Current Avatar Preview -->
+              <div class="avatar placeholder">
+                <div class="w-24 h-24 rounded-full bg-primary text-primary-content flex items-center justify-center">
+                  <%= if @current_user.avatar_filename do %>
+                    <img src={"/uploads/avatars/#{@current_user.avatar_filename}"} alt="Your avatar" class="rounded-full w-full h-full object-cover" />
+                  <% else %>
+                    <span class="text-3xl">
+                      {String.first(@current_user.username) |> String.upcase()}
+                    </span>
+                  <% end %>
+                </div>
+              </div>
+
+              <!-- Upload/Change Controls -->
+              <div class="flex-1">
+                <form id="avatar-form" phx-submit="save_avatar" phx-change="validate_avatar">
+                  <.live_file_input upload={@uploads.avatar} class="file-input file-input-bordered w-full max-w-xs" />
+
+                  <div :for={entry <- @uploads.avatar.entries} class="mt-2 flex items-center gap-2">
+                    <.live_img_preview entry={entry} class="w-16 h-16 rounded-full object-cover" />
+                    <progress value={entry.progress} max="100" class="progress progress-primary w-32" />
+                    <button type="button" phx-click="cancel_avatar_upload" phx-value-ref={entry.ref} class="btn btn-xs btn-ghost">
+                      Cancel
+                    </button>
+                  </div>
+
+                  <div :for={err <- upload_errors(@uploads.avatar)} class="text-error text-sm mt-1">
+                    {upload_error_to_string(err)}
+                  </div>
+
+                  <div class="mt-4 flex gap-2">
+                    <button type="submit" class="btn btn-primary btn-sm" disabled={@uploads.avatar.entries == []}>
+                      Upload
+                    </button>
+                    <button :if={@current_user.avatar_filename} type="button" phx-click="remove_avatar" class="btn btn-ghost btn-sm">
+                      Remove
+                    </button>
+                  </div>
+                </form>
+
+                <p class="text-xs text-base-content/50 mt-2">
+                  Accepted formats: JPEG, PNG, GIF, WebP. Max size: 2MB.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Profile Section -->
@@ -162,6 +228,60 @@ defmodule ElixirchatWeb.SettingsLive do
   end
 
   @impl true
+  def handle_event("validate_avatar", _params, socket) do
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("cancel_avatar_upload", %{"ref" => ref}, socket) do
+    {:noreply, cancel_upload(socket, :avatar, ref)}
+  end
+
+  @impl true
+  def handle_event("save_avatar", _params, socket) do
+    uploaded_files =
+      consume_uploaded_entries(socket, :avatar, fn %{path: path}, entry ->
+        # Generate unique filename with user ID prefix
+        ext = Path.extname(entry.client_name)
+        dest_filename = "#{socket.assigns.current_user.id}-#{Ecto.UUID.generate()}#{ext}"
+        dest = Path.join(Accounts.avatars_dir(), dest_filename)
+        File.cp!(path, dest)
+        {:ok, dest_filename}
+      end)
+
+    case uploaded_files do
+      [filename] ->
+        case Accounts.update_user_avatar(socket.assigns.current_user, %{avatar_filename: filename}) do
+          {:ok, user} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Avatar updated!")
+             |> assign(current_user: user)}
+
+          {:error, _} ->
+            {:noreply, put_flash(socket, :error, "Failed to update avatar")}
+        end
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("remove_avatar", _params, socket) do
+    case Accounts.delete_user_avatar(socket.assigns.current_user) do
+      {:ok, user} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Avatar removed")
+         |> assign(current_user: user)}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to remove avatar")}
+    end
+  end
+
+  @impl true
   def handle_event("validate_password", params, socket) do
     password_params = Map.get(params, "password", %{})
 
@@ -230,4 +350,5 @@ defmodule ElixirchatWeb.SettingsLive do
       {:noreply, socket}
     end
   end
+
 end

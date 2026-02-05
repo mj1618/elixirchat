@@ -1495,7 +1495,7 @@ defmodule ElixirchatWeb.ChatLive do
 
   defp get_bubble_class(message, current_user_id) do
     cond do
-      is_agent_message?(message) -> "chat-bubble-info"
+      is_agent_message?(message) -> ""
       message.sender_id == current_user_id -> "chat-bubble-primary"
       true -> ""
     end
