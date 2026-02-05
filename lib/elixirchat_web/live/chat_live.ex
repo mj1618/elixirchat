@@ -70,13 +70,27 @@ defmodule ElixirchatWeb.ChatLive do
         Process.cancel_timer(socket.assigns.typing_timer)
       end
 
+      # Include reply_to_id if replying to a message
+      opts =
+        if socket.assigns.replying_to do
+          [reply_to_id: socket.assigns.replying_to.id]
+        else
+          []
+        end
+
       case Chat.send_message(
         socket.assigns.conversation.id,
         socket.assigns.current_user.id,
-        content
+        content,
+        opts
       ) do
         {:ok, _message} ->
-          {:noreply, assign(socket, message_input: "", is_typing: false, typing_timer: nil)}
+          {:noreply, assign(socket, message_input: "", is_typing: false, typing_timer: nil, replying_to: nil)}
+        {:error, :invalid_reply_to} ->
+          {:noreply,
+           socket
+           |> put_flash(:error, "Cannot reply to that message")
+           |> assign(replying_to: nil)}
         {:error, _} ->
           {:noreply, put_flash(socket, :error, "Failed to send message")}
       end
@@ -174,6 +188,33 @@ defmodule ElixirchatWeb.ChatLive do
      socket
      |> assign(show_search: false, search_query: "", search_results: [])
      |> push_event("scroll_to_message", %{message_id: message_id})}
+  end
+
+  # ===============================
+  # Reply Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("start_reply", %{"id" => message_id}, socket) do
+    message_id = String.to_integer(message_id)
+    message = Enum.find(socket.assigns.messages, fn m -> m.id == message_id end)
+
+    # Don't allow replying to deleted messages
+    if message && is_nil(message.deleted_at) do
+      {:noreply, assign(socket, replying_to: message)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("cancel_reply", _, socket) do
+    {:noreply, assign(socket, replying_to: nil)}
+  end
+
+  @impl true
+  def handle_event("scroll_to_message", %{"message-id" => message_id}, socket) do
+    {:noreply, push_event(socket, "scroll_to_message", %{message_id: message_id})}
   end
 
   # ===============================
@@ -830,5 +871,10 @@ defmodule ElixirchatWeb.ChatLive do
       [u1, u2, u3, u4, u5 | rest] ->
         "#{u1.username}, #{u2.username}, #{u3.username}, #{u4.username}, #{u5.username} and #{length(rest)} more"
     end
+  end
+
+  defp truncate(text, max_length) when byte_size(text) <= max_length, do: text
+  defp truncate(text, max_length) do
+    String.slice(text, 0, max_length) <> "..."
   end
 end

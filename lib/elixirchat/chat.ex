@@ -6,7 +6,7 @@ defmodule Elixirchat.Chat do
   import Ecto.Query, warn: false
 
   alias Elixirchat.Repo
-  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction}
+  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt}
   alias Elixirchat.Accounts.User
   alias Elixirchat.Agent
 
