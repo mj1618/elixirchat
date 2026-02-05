@@ -2,7 +2,7 @@ defmodule Elixirchat.Chat.Message do
   use Ecto.Schema
   import Ecto.Changeset
 
-  alias Elixirchat.Chat.{Conversation, Reaction}
+  alias Elixirchat.Chat.{Conversation, Reaction, Attachment, LinkPreview}
   alias Elixirchat.Accounts.User
 
   schema "messages" do
@@ -14,6 +14,8 @@ defmodule Elixirchat.Chat.Message do
     belongs_to :sender, User, foreign_key: :sender_id
     belongs_to :reply_to, __MODULE__
     has_many :reactions, Reaction
+    has_many :attachments, Attachment
+    many_to_many :link_previews, LinkPreview, join_through: "message_link_previews"
 
     timestamps()
   end

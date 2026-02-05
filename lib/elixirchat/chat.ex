@@ -6,7 +6,7 @@ defmodule Elixirchat.Chat do
   import Ecto.Query, warn: false
 
   alias Elixirchat.Repo
-  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt, Attachment, Mentions, PinnedMessage}
+  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt, Attachment, Mentions, PinnedMessage, LinkPreview, MessageLinkPreview, UrlExtractor, LinkPreviewFetcher}
   alias Elixirchat.Accounts.User
   alias Elixirchat.Agent
 
@@ -127,7 +127,7 @@ defmodule Elixirchat.Chat do
   end
 
   @doc """
-  Lists messages in a conversation with reactions and reply_to loaded.
+  Lists messages in a conversation with reactions, reply_to, and link_previews loaded.
   """
   def list_messages(conversation_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
@@ -137,7 +137,7 @@ defmodule Elixirchat.Chat do
       from m in Message,
         where: m.conversation_id == ^conversation_id,
         order_by: [asc: m.inserted_at],
-        preload: [:sender, :attachments, reply_to: :sender]
+        preload: [:sender, :attachments, :link_previews, reply_to: :sender]
 
     query =
       if before_id do
@@ -211,10 +211,10 @@ defmodule Elixirchat.Chat do
         |> Ecto.Changeset.change(%{updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)})
         |> Repo.update()
 
-        # Preload sender, reply_to, and attachments for the response, add empty reactions
+        # Preload sender, reply_to, attachments, and link_previews for the response, add empty reactions
         message =
           message
-          |> Repo.preload([:sender, :attachments, reply_to: :sender], force: true)
+          |> Repo.preload([:sender, :attachments, :link_previews, reply_to: :sender], force: true)
           |> Map.put(:reactions_grouped, %{})
 
         # Broadcast the message
@@ -225,6 +225,9 @@ defmodule Elixirchat.Chat do
         unless Agent.is_agent?(sender_id) do
           maybe_process_agent_mention(conversation_id, content)
         end
+
+        # Trigger async link preview fetching
+        maybe_fetch_link_previews(message)
 
         {:ok, message}
 
@@ -803,6 +806,97 @@ defmodule Elixirchat.Chat do
   """
   def get_attachment!(id) do
     Repo.get!(Attachment, id)
+  end
+
+  # ===============================
+  # Link Preview Functions
+  # ===============================
+
+  @doc """
+  Triggers async link preview fetching for a message.
+  Extracts URLs from the message content and fetches previews in the background.
+  """
+  def maybe_fetch_link_previews(message) do
+    urls = UrlExtractor.extract_urls(message.content)
+
+    if urls != [] do
+      Task.Supervisor.start_child(
+        Elixirchat.TaskSupervisor,
+        fn -> fetch_and_attach_previews(message, urls) end
+      )
+    end
+
+    :ok
+  end
+
+  @doc """
+  Fetches link previews for URLs and attaches them to a message.
+  Called asynchronously from maybe_fetch_link_previews/1.
+  """
+  def fetch_and_attach_previews(message, urls) do
+    previews =
+      urls
+      |> Enum.map(&get_or_create_preview/1)
+      |> Enum.reject(&is_nil/1)
+
+    if previews != [] do
+      # Associate previews with message
+      Enum.each(previews, fn preview ->
+        %MessageLinkPreview{}
+        |> MessageLinkPreview.changeset(%{message_id: message.id, link_preview_id: preview.id})
+        |> Repo.insert(on_conflict: :nothing)
+      end)
+
+      # Broadcast the previews to conversation
+      broadcast_link_previews(message.conversation_id, message.id, previews)
+    end
+
+    :ok
+  end
+
+  @doc """
+  Gets an existing link preview from cache or creates a new one by fetching.
+  """
+  def get_or_create_preview(url) do
+    url_hash = LinkPreview.hash_url(url)
+
+    case Repo.get_by(LinkPreview, url_hash: url_hash) do
+      nil ->
+        # Fetch and create new preview
+        case LinkPreviewFetcher.fetch(url) do
+          {:ok, metadata} ->
+            case create_link_preview(metadata) do
+              {:ok, preview} -> preview
+              {:error, _} -> nil
+            end
+
+          {:error, _} ->
+            nil
+        end
+
+      preview ->
+        preview
+    end
+  end
+
+  @doc """
+  Creates a new link preview record.
+  """
+  def create_link_preview(attrs) do
+    %LinkPreview{}
+    |> LinkPreview.changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @doc """
+  Broadcasts link preview updates to conversation subscribers.
+  """
+  def broadcast_link_previews(conversation_id, message_id, previews) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:link_previews_fetched, %{message_id: message_id, previews: previews}}
+    )
   end
 
   # ===============================

@@ -448,6 +448,21 @@ defmodule ElixirchatWeb.ChatLive do
     {:noreply, assign(socket, messages: messages)}
   end
 
+  @impl true
+  def handle_info({:link_previews_fetched, %{message_id: message_id, previews: previews}}, socket) do
+    # Update the link previews for this message
+    messages =
+      Enum.map(socket.assigns.messages, fn msg ->
+        if msg.id == message_id do
+          Map.put(msg, :link_previews, previews)
+        else
+          msg
+        end
+      end)
+
+    {:noreply, assign(socket, messages: messages)}
+  end
+
   # ===============================
   # Message Pinning Handlers
   # ===============================
@@ -827,9 +842,9 @@ defmodule ElixirchatWeb.ChatLive do
             data-message-id={message.id}
             class={["chat group", get_chat_position(message, @current_user.id)]}
           >
-            <div class="chat-image avatar">
+            <div class="chat-image avatar placeholder">
               <div class={[
-                "w-10 rounded-full flex items-center justify-center text-white font-bold",
+                "w-10 rounded-full text-white font-bold",
                 get_avatar_class(message)
               ]}>
                 <span class="text-lg">{get_sender_initial(message)}</span>
@@ -898,11 +913,11 @@ defmodule ElixirchatWeb.ChatLive do
                 <div :if={length(message.attachments) > 0} class={["mt-2 flex flex-wrap gap-2", message.content == "[Attachment]" && "mt-0"]}>
                   <%= for attachment <- message.attachments do %>
                     <%= if Attachment.image?(attachment) do %>
-                      <a href={~p"/uploads/#{attachment.filename}"} target="_blank" class="block">
-                        <img src={~p"/uploads/#{attachment.filename}"} alt={attachment.original_filename} class="max-w-xs max-h-48 rounded cursor-pointer hover:opacity-90" loading="lazy" />
+                      <a href={"/uploads/#{attachment.filename}"} target="_blank" class="block">
+                        <img src={"/uploads/#{attachment.filename}"} alt={attachment.original_filename} class="max-w-xs max-h-48 rounded cursor-pointer hover:opacity-90" loading="lazy" />
                       </a>
                     <% else %>
-                      <a href={~p"/uploads/#{attachment.filename}"} download={attachment.original_filename} class="flex items-center gap-2 p-2 bg-base-200 rounded hover:bg-base-300">
+                      <a href={"/uploads/#{attachment.filename}"} download={attachment.original_filename} class="flex items-center gap-2 p-2 bg-base-200 rounded hover:bg-base-300">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
                           <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
                         </svg>

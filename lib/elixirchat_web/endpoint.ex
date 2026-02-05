@@ -27,6 +27,12 @@ defmodule ElixirchatWeb.Endpoint do
     only: ElixirchatWeb.static_paths(),
     raise_on_missing_only: code_reloading?
 
+  # Serve uploaded files from priv/static/uploads
+  plug Plug.Static,
+    at: "/uploads",
+    from: {:elixirchat, "priv/static/uploads"},
+    gzip: false
+
   # Code reloading can be explicitly enabled under the
   # :code_reloader configuration of your endpoint.
   if code_reloading? do

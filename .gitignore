@@ -35,3 +35,6 @@ elixirchat-*.tar
 npm-debug.log
 /assets/node_modules/
 
+# File uploads
+/priv/static/uploads/
+
