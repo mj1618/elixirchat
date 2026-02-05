@@ -675,7 +675,7 @@ defmodule ElixirchatWeb.ChatLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="min-h-screen bg-base-200 flex flex-col">
+    <div class="min-h-screen bg-base-200 flex flex-col" id="chat-container" phx-hook="BrowserNotification">
       <div class="navbar bg-base-100 shadow-sm">
         <div class="flex-none">
           <.link navigate={~p"/chats"} class="btn btn-ghost btn-sm">
@@ -688,7 +688,7 @@ defmodule ElixirchatWeb.ChatLive do
           <div class="flex items-center gap-3">
             <div class="avatar placeholder">
               <div class={[
-                "rounded-full w-10",
+                "rounded-full w-10 flex items-center justify-center",
                 @conversation.type == "group" && "bg-secondary text-secondary-content" || "bg-primary text-primary-content"
               ]}>
                 <span>{get_conversation_initial(@conversation, @current_user.id)}</span>
@@ -857,7 +857,7 @@ defmodule ElixirchatWeb.ChatLive do
           >
             <div class="chat-image avatar placeholder">
               <div class={[
-                "w-10 rounded-full text-white font-bold",
+                "w-10 rounded-full text-white font-bold flex items-center justify-center",
                 get_avatar_class(message)
               ]}>
                 <span class="text-lg">{get_sender_initial(message)}</span>
@@ -1143,7 +1143,7 @@ defmodule ElixirchatWeb.ChatLive do
                     class="flex items-center gap-2"
                   >
                     <div class="avatar placeholder">
-                      <div class="bg-neutral text-neutral-content rounded-full w-6">
+                      <div class="bg-neutral text-neutral-content rounded-full w-6 flex items-center justify-center">
                         <span class="text-xs">{String.first(user.username) |> String.upcase()}</span>
                       </div>
                     </div>
