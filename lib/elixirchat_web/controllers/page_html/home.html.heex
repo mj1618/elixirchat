@@ -1,4 +1,26 @@
 <Layouts.flash_group flash={@flash} />
+
+<div class="navbar bg-base-100 shadow-sm mb-4">
+  <div class="flex-1">
+    <a href="/" class="btn btn-ghost text-xl">Elixirchat</a>
+  </div>
+  <div class="flex-none">
+    <%= if @current_user do %>
+      <span class="mr-4">Hello, <strong><%= @current_user.username %></strong></span>
+      <.link href={~p"/logout"} method="delete" class="btn btn-ghost btn-sm">
+        Log Out
+      </.link>
+    <% else %>
+      <.link navigate={~p"/login"} class="btn btn-ghost btn-sm">
+        Log In
+      </.link>
+      <.link navigate={~p"/signup"} class="btn btn-primary btn-sm ml-2">
+        Sign Up
+      </.link>
+    <% end %>
+  </div>
+</div>
+
 <div class="left-[40rem] fixed inset-y-0 right-0 z-0 hidden lg:block xl:left-[50rem]">
   <svg
     viewBox="0 0 1480 957"

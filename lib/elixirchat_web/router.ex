@@ -1,6 +1,8 @@
 defmodule ElixirchatWeb.Router do
   use ElixirchatWeb, :router
 
+  import ElixirchatWeb.Plugs.Auth, only: [redirect_if_authenticated: 2]
+
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
@@ -8,6 +10,7 @@ defmodule ElixirchatWeb.Router do
     plug :put_root_layout, html: {ElixirchatWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+    plug ElixirchatWeb.Plugs.Auth
   end
 
   pipeline :api do
@@ -18,6 +21,16 @@ defmodule ElixirchatWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+    delete "/logout", SessionController, :delete
+  end
+
+  # Routes for non-authenticated users
+  scope "/", ElixirchatWeb do
+    pipe_through [:browser, :redirect_if_authenticated]
+
+    live "/signup", SignupLive
+    live "/login", LoginLive
+    post "/login", SessionController, :create
   end
 
   # Other scopes may use custom stacks.
