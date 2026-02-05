@@ -16,7 +16,21 @@ defmodule ElixirchatWeb.Plugs.Auth do
   def call(conn, _opts) do
     user_id = get_session(conn, :user_id)
     user = user_id && Accounts.get_user(user_id)
-    assign(conn, :current_user, user)
+    Plug.Conn.assign(conn, :current_user, user)
+  end
+
+  @doc """
+  LiveView on_mount callback for ensuring authentication.
+  """
+  def on_mount(:ensure_authenticated, _params, session, socket) do
+    user_id = session["user_id"]
+    user = user_id && Accounts.get_user(user_id)
+
+    if user do
+      {:cont, Phoenix.Component.assign(socket, current_user: user)}
+    else
+      {:halt, Phoenix.LiveView.redirect(socket, to: "/login")}
+    end
   end
 
   @doc """

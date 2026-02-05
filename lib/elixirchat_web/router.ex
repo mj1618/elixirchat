@@ -1,7 +1,7 @@
 defmodule ElixirchatWeb.Router do
   use ElixirchatWeb, :router
 
-  import ElixirchatWeb.Plugs.Auth, only: [redirect_if_authenticated: 2]
+  import ElixirchatWeb.Plugs.Auth, only: [redirect_if_authenticated: 2, require_authenticated_user: 2]
 
   pipeline :browser do
     plug :accepts, ["html"]
@@ -31,6 +31,18 @@ defmodule ElixirchatWeb.Router do
     live "/signup", SignupLive
     live "/login", LoginLive
     post "/login", SessionController, :create
+  end
+
+  # Routes for authenticated users
+  scope "/", ElixirchatWeb do
+    pipe_through [:browser, :require_authenticated_user]
+
+    live_session :authenticated,
+      on_mount: [{ElixirchatWeb.Plugs.Auth, :ensure_authenticated}] do
+      live "/chats", ChatListLive
+      live "/chats/:id", ChatLive
+      live "/settings", SettingsLive
+    end
   end
 
   # Other scopes may use custom stacks.
