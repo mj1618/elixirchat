@@ -6,6 +6,7 @@ defmodule ElixirchatWeb.ChatLive do
   alias Elixirchat.Agent
   alias Elixirchat.Presence
   alias Elixirchat.Accounts
+  alias Elixirchat.FileValidator
 
   @impl true
   def mount(%{"id" => conversation_id}, _session, socket) do
@@ -154,21 +155,30 @@ defmodule ElixirchatWeb.ChatLive do
         Process.cancel_timer(socket.assigns.typing_timer)
       end
 
-      # Process uploaded files
+      # Process uploaded files with content validation
       uploaded_files =
         consume_uploaded_entries(socket, :attachments, fn %{path: path}, entry ->
-          # Generate unique filename with UUID prefix
-          dest_filename = "#{Ecto.UUID.generate()}-#{entry.client_name}"
-          dest = Path.join(Chat.uploads_dir(), dest_filename)
-          File.cp!(path, dest)
+          # Validate file content matches claimed type
+          case FileValidator.validate_file_content(path, entry.client_type) do
+            :ok ->
+              # Generate unique filename with UUID prefix
+              dest_filename = "#{Ecto.UUID.generate()}-#{entry.client_name}"
+              dest = Path.join(Chat.uploads_dir(), dest_filename)
+              File.cp!(path, dest)
 
-          {:ok, %{
-            filename: dest_filename,
-            original_filename: entry.client_name,
-            content_type: entry.client_type,
-            size: entry.client_size
-          }}
+              {:ok, %{
+                filename: dest_filename,
+                original_filename: entry.client_name,
+                content_type: entry.client_type,
+                size: entry.client_size
+              }}
+
+            {:error, _reason} ->
+              # Skip invalid files - they won't be included in the uploaded_files list
+              {:postpone, nil}
+          end
         end)
+        |> Enum.reject(&is_nil/1)
 
       # Include reply_to_id if replying to a message
       opts =

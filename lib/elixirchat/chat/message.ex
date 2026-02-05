@@ -27,6 +27,7 @@ defmodule Elixirchat.Chat.Message do
   def changeset(message, attrs) do
     message
     |> cast(attrs, [:content, :conversation_id, :sender_id, :reply_to_id])
+    |> sanitize_content()
     |> validate_required([:content, :conversation_id, :sender_id])
     |> validate_length(:content, min: 1, max: 5000)
     |> foreign_key_constraint(:conversation_id)
@@ -40,8 +41,27 @@ defmodule Elixirchat.Chat.Message do
   def edit_changeset(message, attrs) do
     message
     |> cast(attrs, [:content, :edited_at])
+    |> sanitize_content()
     |> validate_required([:content, :edited_at])
     |> validate_length(:content, min: 1, max: 5000)
+  end
+
+  # Sanitize content by removing null bytes and other dangerous control characters
+  # Preserves newlines, tabs, and standard printable characters
+  defp sanitize_content(changeset) do
+    case get_change(changeset, :content) do
+      nil -> changeset
+      content ->
+        sanitized = content
+          # Remove null bytes
+          |> String.replace(<<0>>, "")
+          # Remove other dangerous control characters (keep \n, \r, \t)
+          |> String.replace(~r/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, "")
+          # Normalize unicode to prevent homograph attacks
+          |> String.normalize(:nfc)
+
+        put_change(changeset, :content, sanitized)
+    end
   end
 
   @doc """
@@ -59,6 +79,7 @@ defmodule Elixirchat.Chat.Message do
   def forward_changeset(message, attrs) do
     message
     |> cast(attrs, [:content, :conversation_id, :sender_id, :forwarded_from_message_id, :forwarded_from_user_id])
+    |> sanitize_content()
     |> validate_required([:content, :conversation_id, :sender_id])
     |> validate_length(:content, min: 1, max: 5000)
     |> foreign_key_constraint(:conversation_id)

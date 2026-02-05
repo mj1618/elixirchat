@@ -876,16 +876,23 @@ defmodule Elixirchat.Chat do
 
   @doc """
   Updates the name of a group conversation.
+  Only admins and owners can update the group name.
+  Returns {:ok, conversation} or {:error, reason}.
   """
-  def update_group_name(conversation_id, new_name) do
+  def update_group_name(conversation_id, user_id, new_name) do
     conversation = Repo.get!(Conversation, conversation_id)
 
-    if conversation.type == "group" do
-      conversation
-      |> Conversation.changeset(%{name: new_name})
-      |> Repo.update()
-    else
-      {:error, :not_a_group}
+    cond do
+      conversation.type != "group" ->
+        {:error, :not_a_group}
+
+      !is_admin_or_owner?(conversation_id, user_id) ->
+        {:error, :not_authorized}
+
+      true ->
+        conversation
+        |> Conversation.changeset(%{name: new_name})
+        |> Repo.update()
     end
   end
 
@@ -988,50 +995,60 @@ defmodule Elixirchat.Chat do
   end
 
   @doc """
-  Edits a message's content. Validates ownership and time limit.
+  Edits a message's content. Validates membership, ownership and time limit.
   """
   def edit_message(message_id, user_id, new_content) do
     message = get_message!(message_id)
 
-    case can_modify_message?(message, user_id) do
-      :ok ->
-        message
-        |> Message.edit_changeset(%{content: new_content, edited_at: DateTime.utc_now()})
-        |> Repo.update()
-        |> case do
-          {:ok, updated} ->
-            updated = Repo.preload(updated, :sender, force: true)
-            broadcast_message_edited(message.conversation_id, updated)
-            {:ok, updated}
-          error ->
-            error
-        end
-      error ->
-        error
+    # Check membership first
+    if !member?(message.conversation_id, user_id) do
+      {:error, :not_a_member}
+    else
+      case can_modify_message?(message, user_id) do
+        :ok ->
+          message
+          |> Message.edit_changeset(%{content: new_content, edited_at: DateTime.utc_now()})
+          |> Repo.update()
+          |> case do
+            {:ok, updated} ->
+              updated = Repo.preload(updated, :sender, force: true)
+              broadcast_message_edited(message.conversation_id, updated)
+              {:ok, updated}
+            error ->
+              error
+          end
+        error ->
+          error
+      end
     end
   end
 
   @doc """
-  Soft deletes a message. Validates ownership and time limit.
+  Soft deletes a message. Validates membership, ownership and time limit.
   """
   def delete_message(message_id, user_id) do
     message = get_message!(message_id)
 
-    case can_modify_message?(message, user_id) do
-      :ok ->
-        message
-        |> Message.delete_changeset(%{deleted_at: DateTime.utc_now()})
-        |> Repo.update()
-        |> case do
-          {:ok, updated} ->
-            updated = Repo.preload(updated, :sender, force: true)
-            broadcast_message_deleted(message.conversation_id, updated)
-            {:ok, updated}
-          error ->
-            error
-        end
-      error ->
-        error
+    # Check membership first
+    if !member?(message.conversation_id, user_id) do
+      {:error, :not_a_member}
+    else
+      case can_modify_message?(message, user_id) do
+        :ok ->
+          message
+          |> Message.delete_changeset(%{deleted_at: DateTime.utc_now()})
+          |> Repo.update()
+          |> case do
+            {:ok, updated} ->
+              updated = Repo.preload(updated, :sender, force: true)
+              broadcast_message_deleted(message.conversation_id, updated)
+              {:ok, updated}
+            error ->
+              error
+          end
+        error ->
+          error
+      end
     end
   end
 
@@ -1378,61 +1395,66 @@ defmodule Elixirchat.Chat do
   @doc """
   Pins a message in a conversation.
   Returns {:ok, pinned_message} or {:error, reason}.
-  Errors: :pin_limit_reached, :invalid_message, :already_pinned, :message_deleted
+  Errors: :not_a_member, :pin_limit_reached, :invalid_message, :already_pinned, :message_deleted
   """
   def pin_message(conversation_id, message_id, user_id) do
-    # Check pin limit
-    current_pin_count =
-      from(p in PinnedMessage, where: p.conversation_id == ^conversation_id, select: count(p.id))
-      |> Repo.one()
-
-    if current_pin_count >= PinnedMessage.max_pins_per_conversation() do
-      {:error, :pin_limit_reached}
+    # Check membership first
+    if !member?(conversation_id, user_id) do
+      {:error, :not_a_member}
     else
-      # Get and verify the message
-      case Repo.get(Message, message_id) do
-        nil ->
-          {:error, :invalid_message}
+      # Check pin limit
+      current_pin_count =
+        from(p in PinnedMessage, where: p.conversation_id == ^conversation_id, select: count(p.id))
+        |> Repo.one()
 
-        message ->
-          cond do
-            message.conversation_id != conversation_id ->
-              {:error, :invalid_message}
+      if current_pin_count >= PinnedMessage.max_pins_per_conversation() do
+        {:error, :pin_limit_reached}
+      else
+        # Get and verify the message
+        case Repo.get(Message, message_id) do
+          nil ->
+            {:error, :invalid_message}
 
-            message.deleted_at != nil ->
-              {:error, :message_deleted}
+          message ->
+            cond do
+              message.conversation_id != conversation_id ->
+                {:error, :invalid_message}
 
-            true ->
-              result =
-                %PinnedMessage{}
-                |> PinnedMessage.changeset(%{
-                  message_id: message_id,
-                  conversation_id: conversation_id,
-                  pinned_by_id: user_id,
-                  pinned_at: DateTime.utc_now() |> DateTime.truncate(:second)
-                })
-                |> Repo.insert()
+              message.deleted_at != nil ->
+                {:error, :message_deleted}
 
-              case result do
-                {:ok, pinned} ->
-                  pinned = Repo.preload(pinned, [message: :sender, pinned_by: []])
-                  broadcast_pin_update(conversation_id, {:message_pinned, pinned})
-                  {:ok, pinned}
+              true ->
+                result =
+                  %PinnedMessage{}
+                  |> PinnedMessage.changeset(%{
+                    message_id: message_id,
+                    conversation_id: conversation_id,
+                    pinned_by_id: user_id,
+                    pinned_at: DateTime.utc_now() |> DateTime.truncate(:second)
+                  })
+                  |> Repo.insert()
 
-                {:error, changeset} ->
-                  if changeset.errors[:message_id] do
-                    {:error, :already_pinned}
-                  else
-                    {:error, changeset}
-                  end
-              end
-          end
+                case result do
+                  {:ok, pinned} ->
+                    pinned = Repo.preload(pinned, [message: :sender, pinned_by: []])
+                    broadcast_pin_update(conversation_id, {:message_pinned, pinned})
+                    {:ok, pinned}
+
+                  {:error, changeset} ->
+                    if changeset.errors[:message_id] do
+                      {:error, :already_pinned}
+                    else
+                      {:error, changeset}
+                    end
+                end
+            end
+        end
       end
     end
   end
 
   @doc """
-  Unpins a message. Only the pinner or message author can unpin.
+  Unpins a message. Only conversation members who are the pinner or message author can unpin.
   Returns :ok or {:error, reason}.
   """
   def unpin_message(message_id, user_id) do
@@ -1443,16 +1465,21 @@ defmodule Elixirchat.Chat do
         {:error, :not_pinned}
 
       pinned ->
-        message = Repo.get!(Message, message_id)
-
-        # Only pinner or message author can unpin
-        if pinned.pinned_by_id == user_id || message.sender_id == user_id do
-          conversation_id = pinned.conversation_id
-          {:ok, _} = Repo.delete(pinned)
-          broadcast_pin_update(conversation_id, {:message_unpinned, message_id})
-          :ok
+        # Check membership first
+        if !member?(pinned.conversation_id, user_id) do
+          {:error, :not_a_member}
         else
-          {:error, :not_authorized}
+          message = Repo.get!(Message, message_id)
+
+          # Only pinner or message author can unpin
+          if pinned.pinned_by_id == user_id || message.sender_id == user_id do
+            conversation_id = pinned.conversation_id
+            {:ok, _} = Repo.delete(pinned)
+            broadcast_pin_update(conversation_id, {:message_unpinned, message_id})
+            :ok
+          else
+            {:error, :not_authorized}
+          end
         end
     end
   end

@@ -2,6 +2,7 @@ defmodule ElixirchatWeb.SettingsLive do
   use ElixirchatWeb, :live_view
 
   alias Elixirchat.Accounts
+  alias Elixirchat.FileValidator
 
   @impl true
   def mount(_params, _session, socket) do
@@ -11,9 +12,9 @@ defmodule ElixirchatWeb.SettingsLive do
     {:ok,
      socket
      |> allow_upload(:avatar,
-       accept: ~w(.jpg .jpeg .png .gif .webp),
+       accept: FileValidator.avatar_allowed_extensions(),
        max_entries: 1,
-       max_file_size: 2_000_000
+       max_file_size: FileValidator.avatar_max_size()
      )
      |> assign(
        password_form: to_form(password_changeset, as: "password"),
@@ -323,16 +324,23 @@ defmodule ElixirchatWeb.SettingsLive do
   def handle_event("save_avatar", _params, socket) do
     uploaded_files =
       consume_uploaded_entries(socket, :avatar, fn %{path: path}, entry ->
-        # Generate unique filename with user ID prefix
-        ext = Path.extname(entry.client_name)
-        dest_filename = "#{socket.assigns.current_user.id}-#{Ecto.UUID.generate()}#{ext}"
-        dest = Path.join(Accounts.avatars_dir(), dest_filename)
-        File.cp!(path, dest)
-        {:ok, dest_filename}
+        # Validate file content matches claimed type
+        case FileValidator.validate_avatar(path, entry.client_type, entry.client_size) do
+          :ok ->
+            # Generate unique filename with user ID prefix
+            ext = Path.extname(entry.client_name)
+            dest_filename = "#{socket.assigns.current_user.id}-#{Ecto.UUID.generate()}#{ext}"
+            dest = Path.join(Accounts.avatars_dir(), dest_filename)
+            File.cp!(path, dest)
+            {:ok, {:ok, dest_filename}}
+
+          {:error, reason} ->
+            {:ok, {:error, reason}}
+        end
       end)
 
     case uploaded_files do
-      [filename] ->
+      [{:ok, filename}] ->
         case Accounts.update_user_avatar(socket.assigns.current_user, %{avatar_filename: filename}) do
           {:ok, user} ->
             {:noreply,
@@ -343,6 +351,15 @@ defmodule ElixirchatWeb.SettingsLive do
           {:error, _} ->
             {:noreply, put_flash(socket, :error, "Failed to update avatar")}
         end
+
+      [{:error, :invalid_content}] ->
+        {:noreply, put_flash(socket, :error, "Invalid file content. Please upload a valid image file.")}
+
+      [{:error, :file_too_large}] ->
+        {:noreply, put_flash(socket, :error, "File too large. Maximum size is 2MB.")}
+
+      [{:error, :invalid_type}] ->
+        {:noreply, put_flash(socket, :error, "Invalid file type. Please use JPEG, PNG, GIF, or WebP.")}
 
       _ ->
         {:noreply, socket}

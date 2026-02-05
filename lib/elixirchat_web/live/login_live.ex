@@ -2,7 +2,8 @@ defmodule ElixirchatWeb.LoginLive do
   use ElixirchatWeb, :live_view
 
   def mount(_params, _session, socket) do
-    {:ok, assign(socket, form: to_form(%{"username" => "", "password" => ""}, as: "user"), error: nil)}
+    error = Phoenix.Flash.get(socket.assigns.flash, :error)
+    {:ok, assign(socket, form: to_form(%{"username" => "", "password" => ""}, as: "user"), error: error)}
   end
 
   def render(assigns) do
