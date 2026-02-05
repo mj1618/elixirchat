@@ -368,4 +368,116 @@ defmodule Elixirchat.ChatTest do
       assert user_id == user1.id
     end
   end
+
+  describe "search_messages/2" do
+    test "finds messages matching search query" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+
+      Chat.send_message(conversation.id, user1.id, "Hello world")
+      Chat.send_message(conversation.id, user2.id, "Hi there")
+      Chat.send_message(conversation.id, user1.id, "Another hello message")
+
+      results = Chat.search_messages(conversation.id, "hello")
+
+      assert length(results) == 2
+      contents = Enum.map(results, & &1.content)
+      assert "Hello world" in contents
+      assert "Another hello message" in contents
+    end
+
+    test "search is case insensitive" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+
+      Chat.send_message(conversation.id, user1.id, "HELLO WORLD")
+
+      results = Chat.search_messages(conversation.id, "hello")
+
+      assert length(results) == 1
+      assert hd(results).content == "HELLO WORLD"
+    end
+
+    test "returns empty list for query less than 2 characters" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+
+      Chat.send_message(conversation.id, user1.id, "Hello world")
+
+      assert Chat.search_messages(conversation.id, "h") == []
+      assert Chat.search_messages(conversation.id, "") == []
+    end
+
+    test "returns messages ordered by most recent first" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+
+      Chat.send_message(conversation.id, user1.id, "First test message")
+      Chat.send_message(conversation.id, user2.id, "Second test message")
+      Chat.send_message(conversation.id, user1.id, "Third test message")
+
+      results = Chat.search_messages(conversation.id, "test")
+
+      assert length(results) == 3
+      # Results are ordered by descending inserted_at, so the order should be
+      # newest to oldest. Since timestamps may be identical in tests, we just
+      # verify all messages are present and result is sorted descending.
+      contents = Enum.map(results, & &1.content)
+      assert "First test message" in contents
+      assert "Second test message" in contents
+      assert "Third test message" in contents
+
+      # Verify the ordering is descending by inserted_at
+      timestamps = Enum.map(results, & &1.inserted_at)
+      assert timestamps == Enum.sort(timestamps, {:desc, NaiveDateTime})
+    end
+
+    test "limits results to 20" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+
+      for i <- 1..25 do
+        Chat.send_message(conversation.id, user1.id, "Test message #{i}")
+      end
+
+      results = Chat.search_messages(conversation.id, "Test message")
+
+      assert length(results) == 20
+    end
+
+    test "escapes special LIKE characters in query" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+
+      Chat.send_message(conversation.id, user1.id, "50% discount")
+      Chat.send_message(conversation.id, user2.id, "No discount")
+
+      # The % character should be escaped and treated literally
+      results = Chat.search_messages(conversation.id, "50%")
+
+      assert length(results) == 1
+      assert hd(results).content == "50% discount"
+    end
+
+    test "preloads sender information" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+
+      Chat.send_message(conversation.id, user1.id, "Hello world")
+
+      results = Chat.search_messages(conversation.id, "hello")
+
+      assert length(results) == 1
+      message = hd(results)
+      assert message.sender.id == user1.id
+      assert message.sender.username == user1.username
+    end
+  end
 end
