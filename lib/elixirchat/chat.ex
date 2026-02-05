@@ -6,7 +6,7 @@ defmodule Elixirchat.Chat do
   import Ecto.Query, warn: false
 
   alias Elixirchat.Repo
-  alias Elixirchat.Chat.{Conversation, ConversationMember, Message}
+  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction}
   alias Elixirchat.Accounts.User
   alias Elixirchat.Agent
 
@@ -127,7 +127,7 @@ defmodule Elixirchat.Chat do
   end
 
   @doc """
-  Lists messages in a conversation.
+  Lists messages in a conversation with reactions loaded.
   """
   def list_messages(conversation_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
@@ -146,9 +146,19 @@ defmodule Elixirchat.Chat do
         query
       end
 
-    query
-    |> limit(^limit)
-    |> Repo.all()
+    messages =
+      query
+      |> limit(^limit)
+      |> Repo.all()
+
+    # Batch load reactions for all messages
+    message_ids = Enum.map(messages, & &1.id)
+    reactions_map = get_reactions_for_messages(message_ids)
+
+    # Attach reactions to each message
+    Enum.map(messages, fn message ->
+      Map.put(message, :reactions_grouped, Map.get(reactions_map, message.id, %{}))
+    end)
   end
 
   @doc """
@@ -171,8 +181,11 @@ defmodule Elixirchat.Chat do
         |> Ecto.Changeset.change(%{updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)})
         |> Repo.update()
 
-        # Preload sender for the response
-        message = Repo.preload(message, :sender)
+        # Preload sender for the response and add empty reactions
+        message =
+          message
+          |> Repo.preload(:sender)
+          |> Map.put(:reactions_grouped, %{})
 
         # Broadcast the message
         broadcast_message(conversation_id, message)
@@ -399,5 +412,236 @@ defmodule Elixirchat.Chat do
       where: m.conversation_id == ^conversation_id
     )
     |> Repo.aggregate(:count)
+  end
+
+  # ===============================
+  # Message Search Functions
+  # ===============================
+
+  @doc """
+  Searches messages in a conversation by content.
+  Requires at least 2 characters for the search query.
+  Returns messages with sender info preloaded, ordered by most recent first.
+  """
+  def search_messages(conversation_id, query) when is_binary(query) and byte_size(query) >= 2 do
+    # Escape special characters for ILIKE
+    escaped_query = escape_like_query(query)
+    search_term = "%#{escaped_query}%"
+
+    from(m in Message,
+      where: m.conversation_id == ^conversation_id,
+      where: ilike(m.content, ^search_term),
+      order_by: [desc: m.inserted_at],
+      limit: 20,
+      preload: [:sender]
+    )
+    |> Repo.all()
+  end
+
+  def search_messages(_, _), do: []
+
+  # Escapes special characters used in LIKE/ILIKE patterns
+  defp escape_like_query(query) do
+    query
+    |> String.replace("\\", "\\\\")
+    |> String.replace("%", "\\%")
+    |> String.replace("_", "\\_")
+  end
+
+  # ===============================
+  # Message Edit/Delete Functions
+  # ===============================
+
+  @edit_delete_time_limit_minutes 15
+
+  @doc """
+  Gets a message by ID with sender preloaded.
+  """
+  def get_message!(id) do
+    Message
+    |> Repo.get!(id)
+    |> Repo.preload(:sender)
+  end
+
+  @doc """
+  Checks if a user can modify (edit/delete) a message.
+  Returns :ok or {:error, reason}.
+  """
+  def can_modify_message?(message, user_id) do
+    cond do
+      message.sender_id != user_id -> {:error, :not_owner}
+      message.deleted_at != nil -> {:error, :already_deleted}
+      Agent.is_agent?(message.sender_id) -> {:error, :agent_message}
+      !within_time_limit?(message) -> {:error, :time_expired}
+      true -> :ok
+    end
+  end
+
+  defp within_time_limit?(message) do
+    minutes_since = DateTime.diff(DateTime.utc_now(), message.inserted_at, :minute)
+    minutes_since <= @edit_delete_time_limit_minutes
+  end
+
+  @doc """
+  Edits a message's content. Validates ownership and time limit.
+  """
+  def edit_message(message_id, user_id, new_content) do
+    message = get_message!(message_id)
+
+    case can_modify_message?(message, user_id) do
+      :ok ->
+        message
+        |> Message.edit_changeset(%{content: new_content, edited_at: DateTime.utc_now()})
+        |> Repo.update()
+        |> case do
+          {:ok, updated} ->
+            updated = Repo.preload(updated, :sender, force: true)
+            broadcast_message_edited(message.conversation_id, updated)
+            {:ok, updated}
+          error ->
+            error
+        end
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Soft deletes a message. Validates ownership and time limit.
+  """
+  def delete_message(message_id, user_id) do
+    message = get_message!(message_id)
+
+    case can_modify_message?(message, user_id) do
+      :ok ->
+        message
+        |> Message.delete_changeset(%{deleted_at: DateTime.utc_now()})
+        |> Repo.update()
+        |> case do
+          {:ok, updated} ->
+            updated = Repo.preload(updated, :sender, force: true)
+            broadcast_message_deleted(message.conversation_id, updated)
+            {:ok, updated}
+          error ->
+            error
+        end
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Broadcasts that a message was edited.
+  """
+  def broadcast_message_edited(conversation_id, message) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:message_edited, message}
+    )
+  end
+
+  @doc """
+  Broadcasts that a message was deleted.
+  """
+  def broadcast_message_deleted(conversation_id, message) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:message_deleted, message}
+    )
+  end
+
+  @doc """
+  Returns the edit/delete time limit in minutes.
+  """
+  def edit_delete_time_limit_minutes, do: @edit_delete_time_limit_minutes
+
+  # ===============================
+  # Message Reaction Functions
+  # ===============================
+
+  @doc """
+  Toggles a reaction on a message. If the user already has this reaction,
+  it will be removed. Otherwise, it will be added.
+
+  Returns {:ok, reactions_map} where reactions_map is grouped reactions for the message.
+  """
+  def toggle_reaction(message_id, user_id, emoji) do
+    message = Repo.get!(Message, message_id)
+
+    existing =
+      from(r in Reaction,
+        where: r.message_id == ^message_id and r.user_id == ^user_id and r.emoji == ^emoji
+      )
+      |> Repo.one()
+
+    result =
+      case existing do
+        nil ->
+          # Add reaction
+          %Reaction{}
+          |> Reaction.changeset(%{message_id: message_id, user_id: user_id, emoji: emoji})
+          |> Repo.insert()
+
+        reaction ->
+          # Remove reaction
+          Repo.delete(reaction)
+      end
+
+    case result do
+      {:ok, _} ->
+        reactions = list_message_reactions(message_id)
+        broadcast_reaction_update(message.conversation_id, %{message_id: message_id, reactions: reactions})
+        {:ok, reactions}
+
+      {:error, changeset} ->
+        {:error, changeset}
+    end
+  end
+
+  @doc """
+  Lists all reactions for a message, grouped by emoji.
+  Returns a map like %{"👍" => [%User{}, %User{}], "❤️" => [%User{}]}
+  """
+  def list_message_reactions(message_id) do
+    from(r in Reaction,
+      where: r.message_id == ^message_id,
+      preload: [:user],
+      order_by: [asc: r.inserted_at]
+    )
+    |> Repo.all()
+    |> Enum.group_by(& &1.emoji, & &1.user)
+  end
+
+  @doc """
+  Batch loads reactions for a list of messages.
+  Returns a map of message_id => reactions_grouped_by_emoji
+  """
+  def get_reactions_for_messages(message_ids) when is_list(message_ids) do
+    from(r in Reaction,
+      where: r.message_id in ^message_ids,
+      preload: [:user],
+      order_by: [asc: r.inserted_at]
+    )
+    |> Repo.all()
+    |> Enum.group_by(& &1.message_id)
+    |> Enum.into(%{}, fn {message_id, reactions} ->
+      grouped = Enum.group_by(reactions, & &1.emoji, & &1.user)
+      {message_id, grouped}
+    end)
+  end
+
+  def get_reactions_for_messages(_), do: %{}
+
+  @doc """
+  Broadcasts a reaction update to conversation subscribers.
+  """
+  def broadcast_reaction_update(conversation_id, reaction_data) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:reaction_updated, reaction_data}
+    )
   end
 end

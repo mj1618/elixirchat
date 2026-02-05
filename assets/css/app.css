@@ -103,3 +103,40 @@
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 
 /* This file is for your main application CSS */
+
+/* Typing indicator animation */
+.typing-dots {
+  animation: blink 1.4s infinite;
+}
+
+@keyframes blink {
+  0%, 20% { opacity: 0; }
+  50% { opacity: 1; }
+  80%, 100% { opacity: 0; }
+}
+
+/* Message search highlight effect */
+.highlight-message {
+  animation: highlight-fade 2s ease-out;
+}
+
+@keyframes highlight-fade {
+  0% { background-color: oklch(58% 0.233 277.117 / 0.3); }
+  100% { background-color: transparent; }
+}
+
+/* Message action buttons - smoother hover transition */
+.chat.group:hover .message-actions {
+  opacity: 1;
+}
+
+/* Deleted message styling */
+.chat-bubble-deleted {
+  font-style: italic;
+  opacity: 0.6;
+}
+
+/* Edit form in chat bubble */
+.chat-bubble-wrapper form {
+  min-width: 200px;
+}

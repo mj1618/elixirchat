@@ -333,4 +333,39 @@ defmodule Elixirchat.ChatTest do
       assert received_message.id == message.id
     end
   end
+
+  describe "typing indicators" do
+    test "broadcast_typing_start/2 broadcasts user typing event" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+
+      # Subscribe to the conversation
+      :ok = Chat.subscribe(conversation.id)
+
+      # Broadcast typing start
+      :ok = Chat.broadcast_typing_start(conversation.id, user1)
+
+      # Verify we receive the broadcast
+      assert_receive {:user_typing, %{user_id: user_id, username: username}}
+      assert user_id == user1.id
+      assert username == user1.username
+    end
+
+    test "broadcast_typing_stop/2 broadcasts user stopped typing event" do
+      user1 = user_fixture()
+      user2 = user_fixture()
+      {:ok, conversation} = Chat.create_direct_conversation(user1.id, user2.id)
+
+      # Subscribe to the conversation
+      :ok = Chat.subscribe(conversation.id)
+
+      # Broadcast typing stop
+      :ok = Chat.broadcast_typing_stop(conversation.id, user1.id)
+
+      # Verify we receive the broadcast
+      assert_receive {:user_stopped_typing, %{user_id: user_id}}
+      assert user_id == user1.id
+    end
+  end
 end
