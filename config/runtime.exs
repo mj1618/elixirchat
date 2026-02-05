@@ -23,6 +23,11 @@ end
 config :elixirchat, ElixirchatWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+# OpenAI API configuration for the AI agent
+config :elixirchat, :openai,
+  api_key: System.get_env("OPENAI_API_KEY"),
+  model: System.get_env("OPENAI_MODEL", "gpt-4o-mini")
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
