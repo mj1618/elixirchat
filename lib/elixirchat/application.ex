@@ -12,6 +12,8 @@ defmodule Elixirchat.Application do
       Elixirchat.Repo,
       {DNSCluster, query: Application.get_env(:elixirchat, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Elixirchat.PubSub},
+      # Presence tracking for online status
+      Elixirchat.Presence,
       # Task supervisor for async operations (e.g., AI agent responses)
       {Task.Supervisor, name: Elixirchat.TaskSupervisor},
       # Start to serve requests, typically the last entry
