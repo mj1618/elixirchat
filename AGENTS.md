@@ -69,3 +69,42 @@ playwright-cli list-pages
 # Close the page when done
 playwright-cli close-page $PAGE_ID
 ```
+
+## playwright-cli Known Issues
+
+- When running multiple commands in sequence, use separate calls instead of chaining with `;` inside the `-e` argument
+- The browser context may persist cookies between pages, causing auth-related redirects
+
+# Application Architecture
+
+## Elixirchat Overview
+
+Elixirchat is a Phoenix LiveView-based chat application with:
+
+- **Authentication**: Username/password based (no email required)
+- **Chat Types**: Direct messages and group chats
+- **Real-time**: Phoenix PubSub for live messaging
+
+## Key Directories
+
+- `lib/elixirchat/` - Business logic (Accounts, Chat contexts)
+- `lib/elixirchat_web/` - Web layer (controllers, LiveViews, components)
+- `lib/elixirchat_web/live/` - LiveView modules
+- `lib/elixirchat_web/plugs/` - Authentication plugs
+
+## Common Issues
+
+### Import Conflicts in auth.ex
+
+The `lib/elixirchat_web/plugs/auth.ex` file mixes Controller and LiveView functions. When modifying it, beware of import conflicts:
+
+- `Phoenix.Controller` and `Phoenix.Component` both export `assign/2`
+- `Phoenix.Controller` and `Phoenix.LiveView` both export `redirect/2`
+
+Solution: Use fully qualified function calls like `Phoenix.Component.assign(...)` or `Phoenix.LiveView.redirect(...)` to avoid ambiguity.
+
+### Server Startup
+
+Run the Phoenix server with: `mix phx.server`
+
+Port: 4000 (default)
