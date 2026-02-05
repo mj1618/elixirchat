@@ -1,0 +1,27 @@
+# fly.toml - Fly.io configuration for elixirchat
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+
+app = 'elixirchat'
+primary_region = 'sjc'
+
+[build]
+
+[deploy]
+  release_command = '/app/bin/migrate'
+
+[env]
+  PHX_HOST = 'elixirchat.fly.dev'
+  PORT = '4000'
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1

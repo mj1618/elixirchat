@@ -1,8 +1,24 @@
 version: "1"
 tasks:
-  planner:
-    prompt: planner
-    iterations: 50
+  # planner:
+  #   prompt: planner
+  #   iterations: 50
   coder:
+    prompt: coder
+    iterations: 50
+
+  coder2:
+    prompt: coder
+    iterations: 50
+
+  coder3:
+    prompt: coder
+    iterations: 50
+
+  coder4:
+    prompt: coder
+    iterations: 50
+
+  coder5:
     prompt: coder
     iterations: 50

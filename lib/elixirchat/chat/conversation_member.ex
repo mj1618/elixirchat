@@ -7,6 +7,8 @@ defmodule Elixirchat.Chat.ConversationMember do
 
   schema "conversation_members" do
     field :last_read_at, :utc_datetime
+    field :pinned_at, :utc_datetime
+    field :archived_at, :utc_datetime
 
     belongs_to :conversation, Conversation
     belongs_to :user, User
@@ -21,5 +23,18 @@ defmodule Elixirchat.Chat.ConversationMember do
     |> foreign_key_constraint(:conversation_id)
     |> foreign_key_constraint(:user_id)
     |> unique_constraint([:conversation_id, :user_id])
+  end
+
+  def pin_changeset(member, attrs) do
+    member
+    |> cast(attrs, [:pinned_at])
+  end
+
+  @doc """
+  Changeset for archiving/unarchiving a conversation membership.
+  """
+  def archive_changeset(member, attrs) do
+    member
+    |> cast(attrs, [:archived_at])
   end
 end

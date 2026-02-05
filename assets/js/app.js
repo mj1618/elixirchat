@@ -109,6 +109,33 @@ const Hooks = {
           this.input.dispatchEvent(new Event('input', { bubbles: true }));
         }
       });
+      
+      // Listen for emoji insertion from emoji picker
+      this.handleEvent("insert_emoji_at_cursor", ({emoji}) => {
+        if (this.input) {
+          const start = this.input.selectionStart;
+          const end = this.input.selectionEnd;
+          const value = this.input.value;
+          const before = value.substring(0, start);
+          const after = value.substring(end);
+          this.input.value = `${before}${emoji}${after}`;
+          this.input.focus();
+          const newPos = start + emoji.length;
+          this.input.setSelectionRange(newPos, newPos);
+          
+          // Trigger input event so LiveView updates
+          this.input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      });
+
+      // Handle clear input event from server
+      this.handleEvent("clear-input", ({id}) => {
+        const input = document.getElementById(id);
+        if (input) {
+          input.value = "";
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      });
 
       // Drag and drop support
       this.setupDragAndDrop();

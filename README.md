@@ -1,21 +1,75 @@
 # Elixirchat
 
-To start your Phoenix server:
+A real-time chat application built with Phoenix LiveView. Features username/password authentication, direct messages, group chats, and an AI agent powered by OpenAI.
 
-* Run `mix setup` to install and setup dependencies
-* Start Phoenix endpoint with `mix phx.server` or inside IEx with `iex -S mix phx.server`
+# Testing
 
-Now you can visit [`localhost:4000`](http://localhost:4000) from your browser.
+Make sure to test your work using the playwright-cli, see AGENTS.md
 
-Ready to run in production? Please [check our deployment guides](https://hexdocs.pm/phoenix/deployment.html).
+## Tech Stack
 
-# Tech stack
+- Elixir / Phoenix 1.8 / LiveView
+- PostgreSQL
+- TailwindCSS + DaisyUI
+- Deployed on Fly.io
 
-Phoeonix + Elixir + PostrgeSQL deployed on fly.io
+## Local Development
 
-# Design
+```bash
+# Install dependencies and setup database
+mix setup
 
-We're going to build a chat application similar to messenger, but there are no emails/phones to authenticate - you just create a (unique) username and password to signup/login, and you add people via their username. You can create group chats and add multiple username, or create a direct chat and search for a username as a singular chat.
+# Start the server
+mix phx.server
+```
 
-Focus on getting this running locally first - and once the application is working locally we will deploy to fly.io
+Visit [localhost:4000](http://localhost:4000)
 
+## Deployment
+
+The app is deployed on Fly.io at **https://elixirchat.fly.dev/**
+
+### Deploy Changes
+
+```bash
+fly deploy
+```
+
+This builds the Docker image, runs migrations automatically, and performs a rolling deploy.
+
+### Useful Commands
+
+```bash
+# View logs
+fly logs
+
+# Check status
+fly status
+
+# SSH into the app
+fly ssh console
+
+# Run IEx console
+fly ssh console --command "/app/bin/elixirchat remote"
+
+# Connect to Postgres
+fly postgres connect -a elixirchat-db
+```
+
+### Environment Variables
+
+Set secrets with `fly secrets set KEY=value`:
+
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | Auto-configured by Fly Postgres |
+| `SECRET_KEY_BASE` | Phoenix secret key |
+| `OPENAI_API_KEY` | For AI agent feature |
+| `PHX_HOST` | Custom domain (optional) |
+
+## Features
+
+- Username/password authentication (no email required)
+- Direct messages between users
+- Group chats with multiple participants
+- AI agent - mention `@agent` in a chat to ask questions

@@ -24,8 +24,8 @@ defmodule ElixirchatWeb.GroupNewLive do
   def handle_event("search", %{"query" => query}, socket) do
     current_user_id = socket.assigns.current_user.id
     selected_ids = Enum.map(socket.assigns.selected_members, & &1.id)
-    
-    results = 
+
+    results =
       Chat.search_users(query, current_user_id)
       |> Enum.reject(fn user -> user.id in selected_ids end)
 
@@ -111,15 +111,16 @@ defmodule ElixirchatWeb.GroupNewLive do
               <label class="label">
                 <span class="label-text font-semibold">Group Name</span>
               </label>
-              <input
-                type="text"
-                value={@group_name}
-                placeholder="Enter group name..."
-                class="input input-bordered w-full"
-                phx-change="update_name"
-                phx-debounce="100"
-                name="name"
-              />
+              <form phx-change="update_name">
+                <input
+                  type="text"
+                  value={@group_name}
+                  placeholder="Enter group name..."
+                  class="input input-bordered w-full"
+                  phx-debounce="100"
+                  name="name"
+                />
+              </form>
             </div>
 
             <div class="divider">Members</div>
@@ -169,8 +170,8 @@ defmodule ElixirchatWeb.GroupNewLive do
                 class="flex items-center justify-between p-3 bg-base-200 rounded-lg"
               >
                 <div class="flex items-center gap-3">
-                  <div class="avatar placeholder">
-                    <div class="bg-neutral text-neutral-content rounded-full w-8">
+                  <div class="avatar avatar-placeholder">
+                    <div class="bg-neutral text-neutral-content rounded-full w-8 h-8 flex items-center justify-center">
                       <span class="text-sm">{String.first(user.username) |> String.upcase()}</span>
                     </div>
                   </div>

@@ -9,6 +9,8 @@ defmodule ElixirchatWeb.ChatListLive do
     # current_user is already assigned by on_mount hook
     current_user = socket.assigns.current_user
     conversations = Chat.list_user_conversations(current_user.id)
+    muted_conversation_ids = Chat.list_muted_conversation_ids(current_user.id)
+    archived_count = Chat.get_archived_count(current_user.id)
 
     # Track presence and subscribe to updates when connected
     online_user_ids =
@@ -26,7 +28,10 @@ defmodule ElixirchatWeb.ChatListLive do
        search_query: "",
        search_results: [],
        show_search: false,
-       online_user_ids: online_user_ids
+       online_user_ids: online_user_ids,
+       muted_conversation_ids: muted_conversation_ids,
+       view_mode: :active,
+       archived_count: archived_count
      )}
   end
 
@@ -55,6 +60,48 @@ defmodule ElixirchatWeb.ChatListLive do
   end
 
   @impl true
+  def handle_event("show_active", _, socket) do
+    conversations = Chat.list_user_conversations(socket.assigns.current_user.id)
+    {:noreply, assign(socket, view_mode: :active, conversations: conversations)}
+  end
+
+  @impl true
+  def handle_event("show_archived", _, socket) do
+    archived = Chat.list_archived_conversations(socket.assigns.current_user.id)
+    {:noreply, assign(socket, view_mode: :archived, conversations: archived)}
+  end
+
+  @impl true
+  def handle_event("archive_conversation", %{"id" => conversation_id}, socket) do
+    conversation_id = String.to_integer(conversation_id)
+
+    case Chat.archive_conversation(conversation_id, socket.assigns.current_user.id) do
+      {:ok, _} ->
+        conversations = Chat.list_user_conversations(socket.assigns.current_user.id)
+        archived_count = Chat.get_archived_count(socket.assigns.current_user.id)
+        {:noreply, assign(socket, conversations: conversations, archived_count: archived_count)}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not archive conversation")}
+    end
+  end
+
+  @impl true
+  def handle_event("unarchive_conversation", %{"id" => conversation_id}, socket) do
+    conversation_id = String.to_integer(conversation_id)
+
+    case Chat.unarchive_conversation(conversation_id, socket.assigns.current_user.id) do
+      {:ok, _} ->
+        archived = Chat.list_archived_conversations(socket.assigns.current_user.id)
+        archived_count = Chat.get_archived_count(socket.assigns.current_user.id)
+        {:noreply, assign(socket, conversations: archived, archived_count: archived_count)}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not unarchive conversation")}
+    end
+  end
+
+  @impl true
   def handle_info(%Phoenix.Socket.Broadcast{event: "presence_diff"}, socket) do
     # Update online user IDs when presence changes
     {:noreply, assign(socket, online_user_ids: Presence.get_online_user_ids())}
@@ -71,6 +118,11 @@ defmodule ElixirchatWeb.ChatListLive do
         <div class="flex-none gap-2 items-center flex">
           <ElixirchatWeb.Layouts.theme_toggle />
           <span class="mr-2">Hello, <strong>{@current_user.username}</strong></span>
+          <.link navigate={~p"/starred"} class="btn btn-ghost btn-sm" title="Starred Messages">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z" />
+            </svg>
+          </.link>
           <.link navigate={~p"/settings"} class="btn btn-ghost btn-sm">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
               <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z" />
@@ -101,6 +153,23 @@ defmodule ElixirchatWeb.ChatListLive do
               New Group
             </.link>
           </div>
+        </div>
+
+        <%!-- Tabs for Active/Archived conversations --%>
+        <div class="tabs tabs-boxed mb-4">
+          <button
+            phx-click="show_active"
+            class={["tab", @view_mode == :active && "tab-active"]}
+          >
+            Chats
+          </button>
+          <button
+            phx-click="show_archived"
+            class={["tab", @view_mode == :archived && "tab-active"]}
+          >
+            Archived
+            <span :if={@archived_count > 0} class="badge badge-sm ml-1">{@archived_count}</span>
+          </button>
         </div>
 
         <div :if={@show_search} class="card bg-base-100 shadow-xl mb-6">
@@ -138,19 +207,23 @@ defmodule ElixirchatWeb.ChatListLive do
         </div>
 
         <div class="space-y-2">
-          <div :if={@conversations == []} class="text-center py-12 text-base-content/70">
+          <div :if={@conversations == [] && @view_mode == :active} class="text-center py-12 text-base-content/70">
             <p>No conversations yet.</p>
             <p class="mt-2">Click "New Chat" to start messaging!</p>
           </div>
 
-          <.link
+          <div :if={@conversations == [] && @view_mode == :archived} class="text-center py-12 text-base-content/70">
+            <p>No archived conversations.</p>
+            <p class="mt-2">Archive conversations to hide them from your main chat list.</p>
+          </div>
+
+          <div
             :for={conv <- @conversations}
-            navigate={~p"/chats/#{conv.id}"}
-            class="card bg-base-100 shadow hover:shadow-md transition-shadow cursor-pointer block"
+            class="card bg-base-100 shadow hover:shadow-md transition-shadow group"
           >
             <div class="card-body p-4">
               <div class="flex items-center justify-between">
-                <div class="flex items-center gap-3">
+                <.link navigate={~p"/chats/#{conv.id}"} class="flex items-center gap-3 flex-1 min-w-0">
                   <div class="avatar avatar-placeholder">
                     <div class={[
                       "rounded-full w-12 h-12 flex items-center justify-center",
@@ -163,14 +236,26 @@ defmodule ElixirchatWeb.ChatListLive do
                       <% end %>
                     </div>
                   </div>
-                  <div>
+                  <div class="min-w-0">
                     <div class="flex items-center gap-2">
                       <div class={[
-                        "w-2.5 h-2.5 rounded-full",
+                        "w-2.5 h-2.5 rounded-full flex-shrink-0",
                         is_conversation_online?(conv, @current_user.id, @online_user_ids) && "bg-success" || "bg-base-content/30"
                       ]}></div>
-                      <h3 class="font-semibold">{get_conversation_name(conv, @current_user.id)}</h3>
-                      <span :if={conv.type == "group"} class="badge badge-sm badge-outline">
+                      <%!-- Pin indicator --%>
+                      <span :if={conv.pinned_at} class="text-primary flex-shrink-0" title="Pinned">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" class="w-4 h-4">
+                          <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
+                        </svg>
+                      </span>
+                      <h3 class="font-semibold truncate">{get_conversation_name(conv, @current_user.id)}</h3>
+                      <%!-- Mute indicator --%>
+                      <span :if={conv.id in @muted_conversation_ids} class="text-warning flex-shrink-0" title="Muted">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 9.75 19.5 12m0 0 2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6 4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
+                        </svg>
+                      </span>
+                      <span :if={conv.type == "group"} class="badge badge-sm badge-outline flex-shrink-0">
                         {get_group_online_text(conv, @online_user_ids)}
                       </span>
                     </div>
@@ -182,18 +267,44 @@ defmodule ElixirchatWeb.ChatListLive do
                       No messages yet
                     </p>
                   </div>
-                </div>
-                <div class="flex flex-col items-end gap-1">
-                  <span :if={conv.last_message} class="text-xs text-base-content/50">
-                    {format_time(conv.last_message.inserted_at)}
-                  </span>
-                  <span :if={conv.unread_count > 0} class="badge badge-primary badge-sm">
-                    {conv.unread_count}
-                  </span>
+                </.link>
+                <div class="flex items-center gap-2 flex-shrink-0">
+                  <div class="flex flex-col items-end gap-1">
+                    <span :if={conv.last_message} class="text-xs text-base-content/50">
+                      {format_time(conv.last_message.inserted_at)}
+                    </span>
+                    <span :if={conv.unread_count > 0} class="badge badge-primary badge-sm">
+                      {conv.unread_count}
+                    </span>
+                  </div>
+                  <%!-- Archive/Unarchive button --%>
+                  <%= if @view_mode == :active do %>
+                    <button
+                      phx-click="archive_conversation"
+                      phx-value-id={conv.id}
+                      class="btn btn-ghost btn-sm btn-circle opacity-0 group-hover:opacity-100 transition-opacity"
+                      title="Archive conversation"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" />
+                      </svg>
+                    </button>
+                  <% else %>
+                    <button
+                      phx-click="unarchive_conversation"
+                      phx-value-id={conv.id}
+                      class="btn btn-ghost btn-sm btn-circle"
+                      title="Unarchive conversation"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0 3-3m-3 3-3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" />
+                      </svg>
+                    </button>
+                  <% end %>
                 </div>
               </div>
             </div>
-          </.link>
+          </div>
         </div>
       </div>
     </div>

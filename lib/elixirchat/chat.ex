@@ -6,7 +6,7 @@ defmodule Elixirchat.Chat do
   import Ecto.Query, warn: false
 
   alias Elixirchat.Repo
-  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt, Attachment, Mentions, PinnedMessage, LinkPreview, MessageLinkPreview, UrlExtractor, LinkPreviewFetcher}
+  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt, Attachment, Mentions, PinnedMessage, LinkPreview, MessageLinkPreview, UrlExtractor, LinkPreviewFetcher, MutedConversation, StarredMessage}
   alias Elixirchat.Accounts.User
   alias Elixirchat.Agent
 
@@ -63,22 +63,39 @@ defmodule Elixirchat.Chat do
 
   @doc """
   Lists all conversations for a user with last message and other member info.
+  Pinned conversations appear first (sorted by pinned_at descending), followed by
+  unpinned conversations sorted by updated_at descending.
+  Archived conversations are excluded by default.
+
+  Options:
+    - `:include_archived` - if true, includes archived conversations (default: false)
   """
-  def list_user_conversations(user_id) do
+  def list_user_conversations(user_id, opts \\ []) do
+    include_archived = Keyword.get(opts, :include_archived, false)
+
     query =
       from c in Conversation,
         join: m in ConversationMember, on: m.conversation_id == c.id,
         where: m.user_id == ^user_id,
         preload: [members: :user],
-        order_by: [desc: c.updated_at]
+        # Sort by: pinned first (desc nulls last), then by updated_at desc
+        order_by: [desc_nulls_last: m.pinned_at, desc: c.updated_at],
+        select: {c, m.pinned_at, m.archived_at}
 
-    conversations = Repo.all(query)
+    query =
+      if include_archived do
+        query
+      else
+        from [c, m] in query, where: is_nil(m.archived_at)
+      end
 
-    # Fetch last message for each conversation
-    Enum.map(conversations, fn conv ->
+    results = Repo.all(query)
+
+    # Fetch last message for each conversation and include pinned_at
+    Enum.map(results, fn {conv, pinned_at, archived_at} ->
       last_message = get_last_message(conv.id)
       unread_count = get_unread_count(conv.id, user_id)
-      Map.merge(conv, %{last_message: last_message, unread_count: unread_count})
+      Map.merge(conv, %{last_message: last_message, unread_count: unread_count, pinned_at: pinned_at, archived_at: archived_at})
     end)
   end
 
@@ -127,7 +144,7 @@ defmodule Elixirchat.Chat do
   end
 
   @doc """
-  Lists messages in a conversation with reactions, reply_to, and link_previews loaded.
+  Lists messages in a conversation with reactions, reply_to, forwarded_from_user, and link_previews loaded.
   """
   def list_messages(conversation_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
@@ -137,7 +154,7 @@ defmodule Elixirchat.Chat do
       from m in Message,
         where: m.conversation_id == ^conversation_id,
         order_by: [asc: m.inserted_at],
-        preload: [:sender, :attachments, :link_previews, reply_to: :sender]
+        preload: [:sender, :attachments, :link_previews, :forwarded_from_user, reply_to: :sender]
 
     query =
       if before_id do
@@ -220,6 +237,9 @@ defmodule Elixirchat.Chat do
         # Broadcast the message
         broadcast_message(conversation_id, message)
 
+        # Auto-unarchive for recipients when a new message is sent
+        maybe_unarchive_for_recipients(conversation_id, sender_id)
+
         # Check for @agent mention and process asynchronously
         # Don't process agent messages to avoid infinite loops
         unless Agent.is_agent?(sender_id) do
@@ -246,6 +266,77 @@ defmodule Elixirchat.Chat do
     end
 
     :ok
+  end
+
+  @doc """
+  Forwards a message to another conversation.
+  Creates a new message with forwarding attribution.
+  """
+  def forward_message(message_id, to_conversation_id, sender_id, opts \\ []) do
+    original = get_message!(message_id) |> Repo.preload([:attachments])
+
+    cond do
+      # Don't forward deleted messages
+      original.deleted_at != nil ->
+        {:error, :message_deleted}
+
+      # Verify sender is member of target conversation
+      !member?(to_conversation_id, sender_id) ->
+        {:error, :not_member}
+
+      true ->
+        attrs = %{
+          content: original.content,
+          conversation_id: to_conversation_id,
+          sender_id: sender_id,
+          forwarded_from_message_id: message_id,
+          forwarded_from_user_id: original.sender_id
+        }
+
+        result =
+          %Message{}
+          |> Message.forward_changeset(attrs)
+          |> Repo.insert()
+
+        case result do
+          {:ok, message} ->
+            # Copy attachments if any and opts allow
+            if Keyword.get(opts, :include_attachments, true) && length(original.attachments) > 0 do
+              copy_attachments(original, message)
+            end
+
+            # Update conversation timestamp
+            Repo.get!(Conversation, to_conversation_id)
+            |> Ecto.Changeset.change(%{updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)})
+            |> Repo.update()
+
+            # Preload and broadcast
+            message =
+              message
+              |> Repo.preload([:sender, :attachments, :link_previews, :forwarded_from_user, reply_to: :sender], force: true)
+              |> Map.put(:reactions_grouped, %{})
+
+            broadcast_message(to_conversation_id, message)
+            {:ok, message}
+
+          error ->
+            error
+        end
+    end
+  end
+
+  defp copy_attachments(original_message, new_message) do
+    Enum.each(original_message.attachments, fn attachment ->
+      %Attachment{}
+      |> Attachment.changeset(%{
+        message_id: new_message.id,
+        filename: attachment.filename,
+        original_filename: attachment.original_filename,
+        content_type: attachment.content_type,
+        size: attachment.size
+      })
+      |> Repo.insert!()
+    end)
   end
 
   @doc """
@@ -1123,6 +1214,79 @@ defmodule Elixirchat.Chat do
   end
 
   # ===============================
+  # Conversation Pinning Functions
+  # ===============================
+
+  @doc """
+  Pins a conversation for a user.
+  Sets pinned_at to the current timestamp.
+  """
+  def pin_conversation(conversation_id, user_id) do
+    from(m in ConversationMember,
+      where: m.conversation_id == ^conversation_id and m.user_id == ^user_id
+    )
+    |> Repo.one()
+    |> case do
+      nil ->
+        {:error, :not_a_member}
+
+      member ->
+        member
+        |> ConversationMember.pin_changeset(%{pinned_at: DateTime.utc_now() |> DateTime.truncate(:second)})
+        |> Repo.update()
+    end
+  end
+
+  @doc """
+  Unpins a conversation for a user.
+  Sets pinned_at to nil.
+  """
+  def unpin_conversation(conversation_id, user_id) do
+    from(m in ConversationMember,
+      where: m.conversation_id == ^conversation_id and m.user_id == ^user_id
+    )
+    |> Repo.one()
+    |> case do
+      nil ->
+        {:error, :not_a_member}
+
+      member ->
+        member
+        |> ConversationMember.pin_changeset(%{pinned_at: nil})
+        |> Repo.update()
+    end
+  end
+
+  @doc """
+  Checks if a conversation is pinned for a user.
+  """
+  def is_conversation_pinned?(conversation_id, user_id) do
+    from(m in ConversationMember,
+      where: m.conversation_id == ^conversation_id and m.user_id == ^user_id,
+      where: not is_nil(m.pinned_at)
+    )
+    |> Repo.exists?()
+  end
+
+  @doc """
+  Toggles the pin state for a conversation.
+  Returns {:ok, :pinned} or {:ok, :unpinned}.
+  """
+  def toggle_conversation_pin(conversation_id, user_id) do
+    if is_conversation_pinned?(conversation_id, user_id) do
+      case unpin_conversation(conversation_id, user_id) do
+        {:ok, _} -> {:ok, :unpinned}
+        error -> error
+      end
+    else
+      case pin_conversation(conversation_id, user_id) do
+        {:ok, _} -> {:ok, :pinned}
+        error -> error
+      end
+    end
+  end
+
+  # ===============================
   # General Group Functions
   # ===============================
 
@@ -1186,5 +1350,280 @@ defmodule Elixirchat.Chat do
         {:error, _} = error -> error
       end
     end
+  end
+
+  # ===============================
+  # Muted Conversation Functions
+  # ===============================
+
+  @doc """
+  Mutes a conversation for a user.
+  When a conversation is muted, the user won't receive browser notifications for new messages.
+  Returns {:ok, muted_conversation} or {:ok, nil} if already muted (on_conflict: :nothing).
+  """
+  def mute_conversation(conversation_id, user_id) do
+    %MutedConversation{}
+    |> MutedConversation.changeset(%{conversation_id: conversation_id, user_id: user_id})
+    |> Repo.insert(on_conflict: :nothing)
+  end
+
+  @doc """
+  Unmutes a conversation for a user.
+  Returns :ok whether or not the conversation was previously muted.
+  """
+  def unmute_conversation(conversation_id, user_id) do
+    from(m in MutedConversation,
+      where: m.conversation_id == ^conversation_id and m.user_id == ^user_id
+    )
+    |> Repo.delete_all()
+
+    :ok
+  end
+
+  @doc """
+  Checks if a conversation is muted by a user.
+  """
+  def is_muted?(conversation_id, user_id) do
+    from(m in MutedConversation,
+      where: m.conversation_id == ^conversation_id and m.user_id == ^user_id
+    )
+    |> Repo.exists?()
+  end
+
+  @doc """
+  Lists all conversation IDs that are muted by a user.
+  Returns a list of conversation IDs.
+  """
+  def list_muted_conversation_ids(user_id) do
+    from(m in MutedConversation,
+      where: m.user_id == ^user_id,
+      select: m.conversation_id
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Toggles the mute status of a conversation for a user.
+  Returns {:ok, :muted} or {:ok, :unmuted}.
+  """
+  def toggle_mute(conversation_id, user_id) do
+    if is_muted?(conversation_id, user_id) do
+      unmute_conversation(conversation_id, user_id)
+      {:ok, :unmuted}
+    else
+      mute_conversation(conversation_id, user_id)
+      {:ok, :muted}
+    end
+  end
+
+  # ===============================
+  # Archived Conversation Functions
+  # ===============================
+
+  @doc """
+  Archives a conversation for a user.
+  Returns {:ok, member} or {:error, :not_a_member}.
+  """
+  def archive_conversation(conversation_id, user_id) do
+    case get_membership(conversation_id, user_id) do
+      nil ->
+        {:error, :not_a_member}
+
+      member ->
+        member
+        |> ConversationMember.archive_changeset(%{archived_at: DateTime.utc_now()})
+        |> Repo.update()
+    end
+  end
+
+  @doc """
+  Unarchives a conversation for a user.
+  Returns {:ok, member} or {:error, :not_a_member}.
+  """
+  def unarchive_conversation(conversation_id, user_id) do
+    case get_membership(conversation_id, user_id) do
+      nil ->
+        {:error, :not_a_member}
+
+      member ->
+        member
+        |> ConversationMember.archive_changeset(%{archived_at: nil})
+        |> Repo.update()
+    end
+  end
+
+  @doc """
+  Checks if a conversation is archived by a user.
+  """
+  def is_archived?(conversation_id, user_id) do
+    case get_membership(conversation_id, user_id) do
+      nil -> false
+      member -> member.archived_at != nil
+    end
+  end
+
+  @doc """
+  Lists all archived conversations for a user.
+  Returns conversations with last_message, unread_count, and archived_at fields.
+  """
+  def list_archived_conversations(user_id) do
+    query =
+      from c in Conversation,
+        join: m in ConversationMember, on: m.conversation_id == c.id,
+        where: m.user_id == ^user_id,
+        where: not is_nil(m.archived_at),
+        preload: [members: :user],
+        order_by: [desc: m.archived_at],
+        select: {c, m.pinned_at, m.archived_at}
+
+    results = Repo.all(query)
+
+    Enum.map(results, fn {conv, pinned_at, archived_at} ->
+      last_message = get_last_message(conv.id)
+      unread_count = get_unread_count(conv.id, user_id)
+      Map.merge(conv, %{last_message: last_message, unread_count: unread_count, pinned_at: pinned_at, archived_at: archived_at})
+    end)
+  end
+
+  @doc """
+  Returns the count of archived conversations for a user.
+  """
+  def get_archived_count(user_id) do
+    from(m in ConversationMember,
+      where: m.user_id == ^user_id,
+      where: not is_nil(m.archived_at)
+    )
+    |> Repo.aggregate(:count)
+  end
+
+  @doc """
+  Toggles the archive status of a conversation for a user.
+  Returns {:ok, :archived} or {:ok, :unarchived}.
+  """
+  def toggle_archive(conversation_id, user_id) do
+    if is_archived?(conversation_id, user_id) do
+      case unarchive_conversation(conversation_id, user_id) do
+        {:ok, _} -> {:ok, :unarchived}
+        error -> error
+      end
+    else
+      case archive_conversation(conversation_id, user_id) do
+        {:ok, _} -> {:ok, :archived}
+        error -> error
+      end
+    end
+  end
+
+  @doc """
+  Unarchives a conversation for all members except the sender.
+  Called when a new message is sent to auto-unarchive for recipients.
+  """
+  def maybe_unarchive_for_recipients(conversation_id, sender_id) do
+    from(m in ConversationMember,
+      where: m.conversation_id == ^conversation_id,
+      where: m.user_id != ^sender_id,
+      where: not is_nil(m.archived_at)
+    )
+    |> Repo.update_all(set: [archived_at: nil])
+
+    :ok
+  end
+
+  defp get_membership(conversation_id, user_id) do
+    Repo.get_by(ConversationMember,
+      conversation_id: conversation_id,
+      user_id: user_id
+    )
+  end
+
+  # ===============================
+  # Starred Message Functions
+  # ===============================
+
+  @doc """
+  Stars a message for a user.
+  Returns {:ok, starred_message} or {:error, reason}.
+  The user must be a member of the message's conversation.
+  """
+  def star_message(message_id, user_id) do
+    message = Repo.get!(Message, message_id)
+
+    if member?(message.conversation_id, user_id) do
+      %StarredMessage{}
+      |> StarredMessage.changeset(%{
+        message_id: message_id,
+        user_id: user_id,
+        starred_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+      |> Repo.insert(on_conflict: :nothing)
+    else
+      {:error, :not_a_member}
+    end
+  end
+
+  @doc """
+  Unstars a message for a user.
+  Returns :ok whether or not the message was starred.
+  """
+  def unstar_message(message_id, user_id) do
+    from(s in StarredMessage,
+      where: s.message_id == ^message_id and s.user_id == ^user_id
+    )
+    |> Repo.delete_all()
+
+    :ok
+  end
+
+  @doc """
+  Toggles the starred status of a message for a user.
+  Returns {:ok, :starred} or {:ok, :unstarred}.
+  """
+  def toggle_star(message_id, user_id) do
+    if is_starred?(message_id, user_id) do
+      unstar_message(message_id, user_id)
+      {:ok, :unstarred}
+    else
+      case star_message(message_id, user_id) do
+        {:ok, _} -> {:ok, :starred}
+        error -> error
+      end
+    end
+  end
+
+  @doc """
+  Checks if a message is starred by a user.
+  """
+  def is_starred?(message_id, user_id) do
+    from(s in StarredMessage,
+      where: s.message_id == ^message_id and s.user_id == ^user_id
+    )
+    |> Repo.exists?()
+  end
+
+  @doc """
+  Lists all starred messages for a user, grouped by conversation.
+  Returns a list of starred messages with message, sender, and conversation preloaded.
+  """
+  def list_starred_messages(user_id) do
+    from(s in StarredMessage,
+      where: s.user_id == ^user_id,
+      join: m in assoc(s, :message),
+      join: c in assoc(m, :conversation),
+      preload: [message: {m, [sender: [], conversation: {c, [members: :user]}]}],
+      order_by: [desc: s.starred_at]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Gets starred message IDs for a user as a MapSet for fast lookup.
+  """
+  def get_starred_message_ids(user_id) do
+    from(s in StarredMessage,
+      where: s.user_id == ^user_id,
+      select: s.message_id
+    )
+    |> Repo.all()
+    |> MapSet.new()
   end
 end

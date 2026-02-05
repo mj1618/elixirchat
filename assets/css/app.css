@@ -104,6 +104,13 @@
 
 /* This file is for your main application CSS */
 
+/* Fix avatar placeholder text centering - DaisyUI's .avatar > div sets display: block */
+.avatar.placeholder > div {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* Typing indicator animation */
 .typing-dots {
   animation: blink 1.4s infinite;
@@ -139,6 +146,22 @@
 /* Edit form in chat bubble */
 .chat-bubble-wrapper form {
   min-width: 200px;
+}
+
+/* Mention styling */
+.mention {
+  background-color: oklch(var(--color-primary) / 0.15);
+  padding: 0.0625rem 0.25rem;
+  border-radius: 0.25rem;
+}
+
+/* Mentions inside colored chat bubbles need different styling for visibility */
+.chat-bubble-primary .mention,
+.chat-bubble-secondary .mention,
+.chat-bubble-info .mention {
+  /* Use inherited text color (light) and a white semi-transparent background */
+  color: inherit;
+  background-color: oklch(100% 0 0 / 0.25);
 }
 
 /* Markdown content styles */
@@ -227,4 +250,78 @@
 .markdown-content li > ul,
 .markdown-content li > ol {
   margin: 0;
+}
+
+/* Emoji picker styles */
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+}
+
+.emoji-btn {
+  padding: 0.25rem;
+  font-size: 1.25rem;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  transition: background-color 0.15s, transform 0.15s;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+}
+
+.emoji-btn:hover {
+  background-color: oklch(var(--color-base-200));
+  transform: scale(1.2);
+}
+
+.emoji-category-tab {
+  padding: 0.5rem;
+  font-size: 1.125rem;
+  cursor: pointer;
+  transition: background-color 0.15s;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  flex-shrink: 0;
+}
+
+.emoji-category-tab:hover {
+  background-color: oklch(var(--color-base-200));
+}
+
+.emoji-category-tab.active {
+  background-color: oklch(var(--color-base-200));
+  border-bottom-color: oklch(var(--color-primary));
+}
+
+/* Scroll to bottom button */
+#scroll-to-bottom-btn {
+  transition: opacity 0.2s ease-in-out, transform 0.2s ease-in-out;
+  z-index: 10;
+}
+
+#scroll-to-bottom-btn:not(.hidden) {
+  animation: bounce-in 0.3s ease-out;
+}
+
+#scroll-to-bottom-btn:hover {
+  transform: scale(1.1);
+}
+
+@keyframes bounce-in {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.9);
+  }
+  50% {
+    transform: translateY(-2px) scale(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }

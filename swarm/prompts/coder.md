@@ -1,9 +1,15 @@
+# AGENTS.md
+
+Read the AGENTS.md before starting work.
+
 # Find unfinished tasks
 
 Use your agent id to find tasks that you left unfinished by looking for files named:
 ./swarm/todo/\*.{SWARM_TASK_ID}.processing.md
 
 If you found a task to continue, skip the "Find a task to complete" section and jump straight to "Execute the task".
+
+If you didn't find a task - jump to "If nothing to do" section and just do that section.
 
 # Find a task to complete
 
@@ -23,8 +29,12 @@ When you\'re done, `git add .`, `git commit -m "a suitable message` and `git pus
 
 # If nothing to do
 
-If there are no pending tasks found, your job is to test the feature and report any issues.
-Then write those issues as new pending tasks in the swarm/todo/{feature-name}/ folder.
+If there are no pending tasks found, your job is to write the next task.
+
+FOCUS: focus on rounding out existing features and making sure they work properly! 
+
+Look through the README.md file, the swarm/todo/* files and the code base in general and find the next thing to implement/test/refactor.
+Write the next thing to ./swarm/todo/{incremental-number}-{task-name}.pending.md
 When you have done that exit immediately!
 
 # Keep README.md and AGENTS.md updated

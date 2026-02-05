@@ -16,7 +16,6 @@ defmodule Elixirchat.Chat.LinkPreviewFetcher do
     case Req.get(url,
            headers: [{"user-agent", @user_agent}],
            receive_timeout: @timeout,
-           redirect: true,
            max_redirects: 5
          ) do
       {:ok, %{status: status, body: body}} when status in 200..299 and is_binary(body) ->

@@ -13,6 +13,8 @@ defmodule Elixirchat.Chat.Message do
     belongs_to :conversation, Conversation
     belongs_to :sender, User, foreign_key: :sender_id
     belongs_to :reply_to, __MODULE__
+    belongs_to :forwarded_from_message, __MODULE__
+    belongs_to :forwarded_from_user, User
     has_many :reactions, Reaction
     has_many :attachments, Attachment
     many_to_many :link_previews, LinkPreview, join_through: "message_link_previews"
@@ -47,5 +49,19 @@ defmodule Elixirchat.Chat.Message do
     message
     |> cast(attrs, [:deleted_at])
     |> validate_required([:deleted_at])
+  end
+
+  @doc """
+  Changeset for forwarding a message.
+  """
+  def forward_changeset(message, attrs) do
+    message
+    |> cast(attrs, [:content, :conversation_id, :sender_id, :forwarded_from_message_id, :forwarded_from_user_id])
+    |> validate_required([:content, :conversation_id, :sender_id])
+    |> validate_length(:content, min: 1, max: 5000)
+    |> foreign_key_constraint(:conversation_id)
+    |> foreign_key_constraint(:sender_id)
+    |> foreign_key_constraint(:forwarded_from_message_id)
+    |> foreign_key_constraint(:forwarded_from_user_id)
   end
 end

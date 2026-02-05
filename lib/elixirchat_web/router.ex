@@ -42,6 +42,7 @@ defmodule ElixirchatWeb.Router do
       live "/chats", ChatListLive
       live "/chats/:id", ChatLive
       live "/groups/new", GroupNewLive
+      live "/starred", StarredLive
       live "/settings", SettingsLive
     end
   end

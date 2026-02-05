@@ -17,6 +17,10 @@ defmodule ElixirchatWeb.ChatLive do
       messages = Chat.list_messages(conversation_id)
       members = Chat.list_group_members(conversation_id)
       pinned_messages = Chat.list_pinned_messages(conversation_id)
+      is_conversation_pinned = Chat.is_conversation_pinned?(conversation_id, current_user.id)
+      is_muted = Chat.is_muted?(conversation_id, current_user.id)
+      is_archived = Chat.is_archived?(conversation_id, current_user.id)
+      starred_message_ids = Chat.get_starred_message_ids(current_user.id)
 
       # Load read receipts for all messages
       message_ids = Enum.map(messages, & &1.id)
@@ -69,7 +73,15 @@ defmodule ElixirchatWeb.ChatLive do
          show_add_member: false,
          add_member_search_query: "",
          add_member_search_results: [],
-         show_leave_confirm: false
+         show_leave_confirm: false,
+         is_muted: is_muted,
+         is_archived: is_archived,
+         is_conversation_pinned: is_conversation_pinned,
+        show_forward_modal: false,
+        forward_message_id: nil,
+        forward_search_query: "",
+        forward_conversations: [],
+        starred_message_ids: starred_message_ids
        )}
     else
       {:ok, redirect(socket, to: "/chats") |> put_flash(:error, "Access denied")}
@@ -127,7 +139,10 @@ defmodule ElixirchatWeb.ChatLive do
         opts
       ) do
         {:ok, _message} ->
-          {:noreply, assign(socket, message_input: "", is_typing: false, typing_timer: nil, replying_to: nil)}
+          {:noreply,
+           socket
+           |> assign(message_input: "", is_typing: false, typing_timer: nil, replying_to: nil)
+           |> push_event("clear-input", %{id: "message-input"})}
         {:error, :invalid_reply_to} ->
           {:noreply,
            socket
@@ -222,6 +237,103 @@ defmodule ElixirchatWeb.ChatLive do
          socket
          |> put_flash(:error, "Could not leave the group")
          |> assign(show_leave_confirm: false)}
+    end
+  end
+
+  # ===============================
+  # Mute Conversation Handler
+  # ===============================
+
+  @impl true
+  def handle_event("toggle_mute", _, socket) do
+    conversation_id = socket.assigns.conversation.id
+    user_id = socket.assigns.current_user.id
+
+    case Chat.toggle_mute(conversation_id, user_id) do
+      {:ok, :muted} ->
+        {:noreply,
+         socket
+         |> assign(is_muted: true)
+         |> put_flash(:info, "Conversation muted")}
+
+      {:ok, :unmuted} ->
+        {:noreply,
+         socket
+         |> assign(is_muted: false)
+         |> put_flash(:info, "Conversation unmuted")}
+    end
+  end
+
+  # ===============================
+  # Archive Conversation Handler
+  # ===============================
+
+  @impl true
+  def handle_event("toggle_archive", _, socket) do
+    conversation_id = socket.assigns.conversation.id
+    user_id = socket.assigns.current_user.id
+
+    case Chat.toggle_archive(conversation_id, user_id) do
+      {:ok, :archived} ->
+        {:noreply,
+         socket
+         |> assign(is_archived: true)
+         |> put_flash(:info, "Conversation archived")}
+
+      {:ok, :unarchived} ->
+        {:noreply,
+         socket
+         |> assign(is_archived: false)
+         |> put_flash(:info, "Conversation unarchived")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not update archive status")}
+    end
+  end
+
+  # ===============================
+  # Starred Message Handler
+  # ===============================
+
+  @impl true
+  def handle_event("toggle_star", %{"message-id" => message_id}, socket) do
+    message_id = String.to_integer(message_id)
+    user_id = socket.assigns.current_user.id
+
+    case Chat.toggle_star(message_id, user_id) do
+      {:ok, :starred} ->
+        starred_ids = MapSet.put(socket.assigns.starred_message_ids, message_id)
+        {:noreply, assign(socket, starred_message_ids: starred_ids)}
+
+      {:ok, :unstarred} ->
+        starred_ids = MapSet.delete(socket.assigns.starred_message_ids, message_id)
+        {:noreply, assign(socket, starred_message_ids: starred_ids)}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Could not star message")}
+    end
+  end
+
+  @impl true
+  def handle_event("toggle_conversation_pin", _, socket) do
+    conversation_id = socket.assigns.conversation.id
+    user_id = socket.assigns.current_user.id
+
+    case Chat.toggle_conversation_pin(conversation_id, user_id) do
+      {:ok, :pinned} ->
+        {:noreply,
+         socket
+         |> assign(is_conversation_pinned: true)
+         |> put_flash(:info, "Conversation pinned")}
+
+      {:ok, :unpinned} ->
+        {:noreply,
+         socket
+         |> assign(is_conversation_pinned: false)
+         |> put_flash(:info, "Conversation unpinned")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not update pin status")}
     end
   end
 
@@ -332,6 +444,71 @@ defmodule ElixirchatWeb.ChatLive do
   @impl true
   def handle_event("scroll_to_message", %{"message-id" => message_id}, socket) do
     {:noreply, push_event(socket, "scroll_to_message", %{message_id: message_id})}
+  end
+
+  # ===============================
+  # Forward Message Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("show_forward_modal", %{"message-id" => message_id}, socket) do
+    message_id = String.to_integer(message_id)
+    message = Enum.find(socket.assigns.messages, fn m -> m.id == message_id end)
+
+    if message && is_nil(message.deleted_at) do
+      # Load user's conversations for forwarding
+      conversations = Chat.list_user_conversations(socket.assigns.current_user.id)
+      |> Enum.reject(fn c -> c.id == socket.assigns.conversation.id end) # Exclude current
+
+      {:noreply, assign(socket,
+        show_forward_modal: true,
+        forward_message_id: message_id,
+        forward_conversations: conversations,
+        forward_search_query: ""
+      )}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("forward_search", %{"query" => query}, socket) do
+    conversations = Chat.list_user_conversations(socket.assigns.current_user.id)
+    |> Enum.reject(fn c -> c.id == socket.assigns.conversation.id end)
+    |> Enum.filter(fn c ->
+      name = get_conversation_name(c, socket.assigns.current_user.id)
+      String.contains?(String.downcase(name), String.downcase(query))
+    end)
+
+    {:noreply, assign(socket, forward_search_query: query, forward_conversations: conversations)}
+  end
+
+  @impl true
+  def handle_event("forward_message", %{"conversation-id" => conv_id}, socket) do
+    conv_id = String.to_integer(conv_id)
+    message_id = socket.assigns.forward_message_id
+
+    case Chat.forward_message(message_id, conv_id, socket.assigns.current_user.id) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Message forwarded")
+         |> assign(show_forward_modal: false, forward_message_id: nil)}
+
+      {:error, :message_deleted} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Cannot forward deleted message")
+         |> assign(show_forward_modal: false, forward_message_id: nil)}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to forward message")}
+    end
+  end
+
+  @impl true
+  def handle_event("close_forward_modal", _, socket) do
+    {:noreply, assign(socket, show_forward_modal: false, forward_message_id: nil)}
   end
 
   # ===============================
@@ -702,9 +879,9 @@ defmodule ElixirchatWeb.ChatLive do
         MapSet.delete(users, message.sender.username)
       end)
 
-    # Send browser notification if message is from another user
+    # Send browser notification if message is from another user and conversation is not muted
     socket =
-      if message.sender_id != socket.assigns.current_user.id do
+      if message.sender_id != socket.assigns.current_user.id && !socket.assigns.is_muted do
         push_event(socket, "notify", %{
           sender: message.sender.username,
           message: truncate_for_notification(message.content),
@@ -827,6 +1004,48 @@ defmodule ElixirchatWeb.ChatLive do
           </div>
         </div>
         <div class="flex-none flex items-center gap-2">
+          <%!-- Pin conversation button --%>
+          <button
+            phx-click="toggle_conversation_pin"
+            class={["btn btn-ghost btn-sm", @is_conversation_pinned && "text-primary"]}
+            title={if @is_conversation_pinned, do: "Unpin conversation", else: "Pin conversation"}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" fill={if @is_conversation_pinned, do: "currentColor", else: "none"} viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
+            </svg>
+          </button>
+          <%!-- Mute button --%>
+          <button
+            phx-click="toggle_mute"
+            class={["btn btn-ghost btn-sm", @is_muted && "text-warning"]}
+            title={if @is_muted, do: "Unmute notifications", else: "Mute notifications"}
+          >
+            <%= if @is_muted do %>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 9.75 19.5 12m0 0 2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6 4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
+              </svg>
+            <% else %>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53L6.75 15.75H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
+              </svg>
+            <% end %>
+          </button>
+          <%!-- Archive button --%>
+          <button
+            phx-click="toggle_archive"
+            class={["btn btn-ghost btn-sm", @is_archived && "text-secondary"]}
+            title={if @is_archived, do: "Unarchive conversation", else: "Archive conversation"}
+          >
+            <%= if @is_archived do %>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0 3-3m-3 3-3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" />
+              </svg>
+            <% else %>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" />
+              </svg>
+            <% end %>
+          </button>
           <%!-- Theme toggle --%>
           <ElixirchatWeb.Layouts.theme_toggle />
           <%!-- Search button --%>
@@ -1080,6 +1299,17 @@ defmodule ElixirchatWeb.ChatLive do
               </span>
             </div>
 
+            <%!-- Forwarded message indicator --%>
+            <div
+              :if={message.forwarded_from_user}
+              class="text-xs opacity-70 mb-1 flex items-center gap-1"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3 flex-shrink-0">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3 8.689c0-.864.933-1.406 1.683-.977l7.108 4.061a1.125 1.125 0 0 1 0 1.954l-7.108 4.061A1.125 1.125 0 0 1 3 16.811V8.69Z" />
+              </svg>
+              <span>Forwarded from <strong>@{message.forwarded_from_user.username}</strong></span>
+            </div>
+
             <%!-- Deleted message placeholder --%>
             <div :if={message.deleted_at} class="chat-bubble bg-base-300 text-base-content/50 italic">
               This message was deleted
@@ -1151,6 +1381,17 @@ defmodule ElixirchatWeb.ChatLive do
                     <path stroke-linecap="round" stroke-linejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
                   </svg>
                 </button>
+                <%!-- Forward button --%>
+                <button
+                  phx-click="show_forward_modal"
+                  phx-value-message-id={message.id}
+                  class="btn btn-ghost btn-xs btn-circle bg-base-100 shadow-sm"
+                  title="Forward"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 8.689c0-.864.933-1.406 1.683-.977l7.108 4.061a1.125 1.125 0 0 1 0 1.954l-7.108 4.061A1.125 1.125 0 0 1 3 16.811V8.69ZM12.75 8.689c0-.864.933-1.406 1.683-.977l7.108 4.061a1.125 1.125 0 0 1 0 1.954l-7.108 4.061a1.125 1.125 0 0 1-1.683-.977V8.69Z" />
+                  </svg>
+                </button>
                 <%!-- Pin/Unpin button --%>
                 <button
                   phx-click={if is_message_pinned?(message.id, @pinned_messages), do: "unpin_message", else: "pin_message"}
@@ -1160,6 +1401,18 @@ defmodule ElixirchatWeb.ChatLive do
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" fill={if is_message_pinned?(message.id, @pinned_messages), do: "currentColor", else: "none"} viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
                     <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
+                  </svg>
+                </button>
+                <%!-- Star button --%>
+                <button
+                  :if={is_nil(message.deleted_at)}
+                  phx-click="toggle_star"
+                  phx-value-message-id={message.id}
+                  class={["btn btn-ghost btn-xs btn-circle bg-base-100 shadow-sm", MapSet.member?(@starred_message_ids, message.id) && "text-warning"]}
+                  title={if MapSet.member?(@starred_message_ids, message.id), do: "Unstar", else: "Star"}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill={if MapSet.member?(@starred_message_ids, message.id), do: "currentColor", else: "none"} viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z" />
                   </svg>
                 </button>
                 <%!-- Reaction button --%>
@@ -1400,6 +1653,7 @@ defmodule ElixirchatWeb.ChatLive do
               </div>
               <input
                 type="text"
+                id="message-input"
                 name="message"
                 value={@message_input}
                 placeholder="Type a message... (@ to mention)"
@@ -1416,6 +1670,66 @@ defmodule ElixirchatWeb.ChatLive do
             </form>
           </div>
         </div>
+      </div>
+
+      <%!-- Forward message modal --%>
+      <div :if={@show_forward_modal} class="modal modal-open">
+        <div class="modal-box">
+          <h3 class="font-bold text-lg mb-4">Forward Message</h3>
+
+          <%!-- Search input --%>
+          <form phx-change="forward_search" class="mb-4">
+            <input
+              type="text"
+              name="query"
+              value={@forward_search_query}
+              placeholder="Search conversations..."
+              class="input input-bordered w-full"
+              autofocus
+            />
+          </form>
+
+          <%!-- Conversation list --%>
+          <div class="max-h-64 overflow-y-auto space-y-2">
+            <div :if={@forward_conversations == []} class="text-center py-4 text-base-content/60">
+              No conversations to forward to
+            </div>
+
+            <div
+              :for={conv <- @forward_conversations}
+              class="flex items-center justify-between p-3 hover:bg-base-200 rounded-lg"
+            >
+              <div class="flex items-center gap-3">
+                <div class="avatar avatar-placeholder">
+                  <div class={[
+                    "rounded-full w-10 h-10 flex items-center justify-center",
+                    conv.type == "group" && "bg-secondary text-secondary-content" || "bg-primary text-primary-content"
+                  ]}>
+                    <span>{get_conversation_initial(conv, @current_user.id)}</span>
+                  </div>
+                </div>
+                <div>
+                  <div class="font-medium">{get_conversation_name(conv, @current_user.id)}</div>
+                  <div class="text-xs text-base-content/60">
+                    {if conv.type == "group", do: "Group", else: "Direct message"}
+                  </div>
+                </div>
+              </div>
+              <button
+                phx-click="forward_message"
+                phx-value-conversation-id={conv.id}
+                class="btn btn-primary btn-sm"
+              >
+                Forward
+              </button>
+            </div>
+          </div>
+
+          <div class="modal-action">
+            <button phx-click="close_forward_modal" class="btn btn-ghost">Cancel</button>
+          </div>
+        </div>
+        <div class="modal-backdrop bg-base-content/50" phx-click="close_forward_modal"></div>
       </div>
 
       <%!-- Delete confirmation modal --%>
