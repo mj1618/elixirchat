@@ -65,7 +65,7 @@ defmodule ElixirchatWeb.SettingsLive do
 
             <div class="flex items-center gap-6">
               <!-- Current Avatar Preview -->
-              <div class="avatar placeholder">
+              <div class="avatar avatar-placeholder">
                 <div class="w-24 h-24 rounded-full bg-primary text-primary-content flex items-center justify-center">
                   <%= if @current_user.avatar_filename do %>
                     <img src={"/uploads/avatars/#{@current_user.avatar_filename}"} alt="Your avatar" class="rounded-full w-full h-full object-cover" />

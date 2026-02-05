@@ -151,7 +151,7 @@ defmodule ElixirchatWeb.ChatListLive do
             <div class="card-body p-4">
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-3">
-                  <div class="avatar placeholder">
+                  <div class="avatar avatar-placeholder">
                     <div class={[
                       "rounded-full w-12 h-12 flex items-center justify-center",
                       !get_conversation_avatar(conv, @current_user.id) && (conv.type == "group" && "bg-secondary text-secondary-content" || "bg-primary text-primary-content")

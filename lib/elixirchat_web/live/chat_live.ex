@@ -795,7 +795,7 @@ defmodule ElixirchatWeb.ChatLive do
         </div>
         <div class="flex-1">
           <div class="flex items-center gap-3">
-            <div class="avatar placeholder">
+            <div class="avatar avatar-placeholder">
               <div class={[
                 "rounded-full w-10 h-10 flex items-center justify-center",
                 !get_conversation_avatar(@conversation, @current_user.id) && (@conversation.type == "group" && "bg-secondary text-secondary-content" || "bg-primary text-primary-content")
@@ -1043,7 +1043,7 @@ defmodule ElixirchatWeb.ChatLive do
             data-message-id={message.id}
             class={["chat group", get_chat_position(message, @current_user.id)]}
           >
-            <div class="chat-image avatar placeholder">
+            <div class="chat-image avatar avatar-placeholder">
               <div class={[
                 "w-10 h-10 rounded-full text-white font-bold flex items-center justify-center",
                 !message.sender.avatar_filename && get_avatar_class(message)
@@ -1346,7 +1346,7 @@ defmodule ElixirchatWeb.ChatLive do
                     phx-value-username={user.username}
                     class="flex items-center gap-2"
                   >
-                    <div class="avatar placeholder">
+                    <div class="avatar avatar-placeholder">
                       <div class={["rounded-full w-6 h-6 flex items-center justify-center", !user.avatar_filename && "bg-neutral text-neutral-content"]}>
                         <%= if user.avatar_filename do %>
                           <img src={"/uploads/avatars/#{user.avatar_filename}"} alt={user.username} class="rounded-full w-full h-full object-cover" />

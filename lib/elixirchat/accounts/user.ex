@@ -7,6 +7,7 @@ defmodule Elixirchat.Accounts.User do
     field :password, :string, virtual: true
     field :current_password, :string, virtual: true
     field :password_hash, :string
+    field :avatar_filename, :string
 
     timestamps()
   end
@@ -43,5 +44,13 @@ defmodule Elixirchat.Accounts.User do
       _ ->
         changeset
     end
+  end
+
+  @doc """
+  Changeset for updating avatar.
+  """
+  def avatar_changeset(user, attrs) do
+    user
+    |> cast(attrs, [:avatar_filename])
   end
 end
