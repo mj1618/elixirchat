@@ -259,6 +259,10 @@ defmodule ElixirchatWeb.ChatListLive do
                         {get_group_online_text(conv, @online_user_ids)}
                       </span>
                     </div>
+                    <%!-- User status for direct messages --%>
+                    <p :if={conv.type == "direct" && get_other_user_status(conv, @current_user.id)} class="text-xs text-base-content/60 truncate max-w-xs">
+                      {get_other_user_status(conv, @current_user.id)}
+                    </p>
                     <p :if={conv.last_message} class="text-sm text-base-content/70 truncate max-w-xs">
                       <span :if={conv.type == "group"} class="font-medium">{conv.last_message.sender.username}: </span>
                       {conv.last_message.content}
@@ -373,4 +377,14 @@ defmodule ElixirchatWeb.ChatListLive do
     online = Enum.count(members, fn m -> m.user_id in online_user_ids end)
     "#{online}/#{total} online"
   end
+
+  # Gets the other user's status for direct conversations
+  defp get_other_user_status(%{type: "direct", members: members}, current_user_id) do
+    case Enum.find(members, fn m -> m.user_id != current_user_id end) do
+      nil -> nil
+      member -> member.user.status
+    end
+  end
+
+  defp get_other_user_status(_, _), do: nil
 end

@@ -8,6 +8,8 @@ defmodule Elixirchat.Accounts.User do
     field :current_password, :string, virtual: true
     field :password_hash, :string
     field :avatar_filename, :string
+    field :status, :string
+    field :status_updated_at, :utc_datetime
 
     timestamps()
   end
@@ -52,5 +54,14 @@ defmodule Elixirchat.Accounts.User do
   def avatar_changeset(user, attrs) do
     user
     |> cast(attrs, [:avatar_filename])
+  end
+
+  @doc """
+  Changeset for updating user status.
+  """
+  def status_changeset(user, attrs) do
+    user
+    |> cast(attrs, [:status, :status_updated_at])
+    |> validate_length(:status, max: 100)
   end
 end

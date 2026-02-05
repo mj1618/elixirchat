@@ -1,5 +1,42 @@
 # Task: Custom User Status
 
+## Completion Notes (Agent d12ce640)
+
+Implemented custom user status feature. Changes made:
+
+1. **Database Migration** (`priv/repo/migrations/20260205053710_add_status_to_users.exs`):
+   - Added `status` field (string, max 100 chars)
+   - Added `status_updated_at` field (datetime)
+
+2. **User Schema** (`lib/elixirchat/accounts/user.ex`):
+   - Added `status` and `status_updated_at` fields to schema
+   - Added `status_changeset/2` function
+
+3. **Accounts Context** (`lib/elixirchat/accounts.ex`):
+   - Added `update_user_status/2` function
+   - Added `clear_user_status/1` function
+   - Added `preset_statuses/0` function with 8 preset options
+   - Added `subscribe_to_user_status/1` for PubSub
+   - Added `broadcast_status_change/1` for real-time updates
+
+4. **SettingsLive** (`lib/elixirchat_web/live/settings_live.ex`):
+   - Added Status section with input field and character counter
+   - Added preset status buttons (Available, In a meeting, Working from home, etc.)
+   - Added clear status button
+   - Added event handlers for set_status, set_preset_status, clear_status, update_status_input
+
+5. **ChatLive** (`lib/elixirchat_web/live/chat_live.ex`):
+   - Added `other_user` assign for direct message conversations
+   - Subscribe to other user's status changes via PubSub
+   - Display status in chat header for direct messages
+   - Handle status change broadcasts
+
+6. **ChatListLive** (`lib/elixirchat_web/live/chat_list_live.ex`):
+   - Added `get_other_user_status/2` helper function
+   - Display status in conversation list for direct messages
+
+Tested with playwright-cli - verified status can be set, displayed, and cleared.
+
 ## Description
 Allow users to set a custom status message that displays alongside their username in the chat. This builds on the existing online presence feature and helps users communicate their availability or current situation (e.g., "In a meeting", "On vacation", "Working from home", "Do not disturb"). The status is visible to other users in conversations and the user list.
 
