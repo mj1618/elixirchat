@@ -24,9 +24,54 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/elixirchat"
 import topbar from "../vendor/topbar"
+import EmojiPicker from "./hooks/emoji_picker"
 
 // Custom hooks for chat functionality
 const Hooks = {
+  EmojiPicker,
+  
+  BrowserNotification: {
+    mounted() {
+      // Request notification permission on mount
+      if ("Notification" in window && Notification.permission === "default") {
+        Notification.requestPermission();
+      }
+
+      // Handle notification events from server
+      this.handleEvent("notify", ({ sender, message, conversation_id, conversation_name }) => {
+        // Don't notify if tab is focused
+        if (document.hasFocus()) return;
+
+        // Don't notify if permission not granted
+        if (!("Notification" in window) || Notification.permission !== "granted") return;
+
+        const title = conversation_name || sender;
+        const body = `${sender}: ${this.truncate(message, 100)}`;
+
+        const notification = new Notification(title, {
+          body: body,
+          icon: "/images/logo.svg",
+          tag: `conversation-${conversation_id}`,
+          renotify: true
+        });
+
+        notification.onclick = () => {
+          window.focus();
+          notification.close();
+        };
+
+        // Auto-close after 5 seconds
+        setTimeout(() => notification.close(), 5000);
+      });
+    },
+
+    truncate(str, length) {
+      if (!str) return "";
+      if (str.length <= length) return str;
+      return str.substring(0, length) + "...";
+    }
+  },
+
   MentionInput: {
     mounted() {
       this.input = this.el.querySelector('input[name="message"]');
@@ -171,7 +216,19 @@ const Hooks = {
 
   ScrollToBottom: {
     mounted() {
-      this.scrollToBottom()
+      this.scrollBtn = document.getElementById('scroll-to-bottom-btn');
+      this.isNearBottom = true;
+      
+      // Initial scroll to bottom
+      this.scrollToBottom();
+      
+      // Track scroll position
+      this.el.addEventListener('scroll', () => this.handleScroll());
+      
+      // Listen for manual scroll to bottom button click
+      this.el.addEventListener('scroll-to-bottom', () => {
+        this.scrollToBottom();
+      });
       
       // Listen for scroll_to_message events
       this.handleEvent("scroll_to_message", ({message_id}) => {
@@ -187,12 +244,38 @@ const Hooks = {
       this.setupReadReceiptTracking();
     },
     updated() {
-      this.scrollToBottom()
+      // Only auto-scroll if user was already near bottom
+      if (this.isNearBottom) {
+        this.scrollToBottom();
+      }
       // Re-observe new messages after update
       this.observeNewMessages();
+      // Update button visibility after DOM update
+      this.handleScroll();
+    },
+    handleScroll() {
+      const threshold = 100; // pixels from bottom
+      const scrollTop = this.el.scrollTop;
+      const scrollHeight = this.el.scrollHeight;
+      const clientHeight = this.el.clientHeight;
+      
+      this.isNearBottom = scrollTop + clientHeight >= scrollHeight - threshold;
+      
+      // Show/hide scroll to bottom button
+      if (this.scrollBtn) {
+        if (this.isNearBottom) {
+          this.scrollBtn.classList.add('hidden');
+        } else {
+          this.scrollBtn.classList.remove('hidden');
+        }
+      }
     },
     scrollToBottom() {
-      this.el.scrollTop = this.el.scrollHeight
+      this.el.scrollTop = this.el.scrollHeight;
+      this.isNearBottom = true;
+      if (this.scrollBtn) {
+        this.scrollBtn.classList.add('hidden');
+      }
     },
     setupReadReceiptTracking() {
       // Track which messages have been read

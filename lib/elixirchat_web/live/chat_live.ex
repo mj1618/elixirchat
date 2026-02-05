@@ -300,6 +300,16 @@ defmodule ElixirchatWeb.ChatLive do
   end
 
   # ===============================
+  # Emoji Picker Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("insert_emoji", %{"emoji" => emoji}, socket) do
+    # Insert emoji into message input and send event back to JS to insert at cursor
+    {:noreply, push_event(socket, "insert_emoji_at_cursor", %{emoji: emoji})}
+  end
+
+  # ===============================
   # Message Edit/Delete Handlers
   # ===============================
 
@@ -675,8 +685,8 @@ defmodule ElixirchatWeb.ChatLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="min-h-screen bg-base-200 flex flex-col" id="chat-container" phx-hook="BrowserNotification">
-      <div class="navbar bg-base-100 shadow-sm">
+    <div class="h-screen bg-base-200 flex flex-col overflow-hidden" id="chat-container" phx-hook="BrowserNotification">
+      <div class="navbar bg-base-100 shadow-sm flex-shrink-0">
         <div class="flex-none">
           <.link navigate={~p"/chats"} class="btn btn-ghost btn-sm">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
@@ -798,7 +808,7 @@ defmodule ElixirchatWeb.ChatLive do
       </div>
 
       <%!-- Pinned messages section --%>
-      <div :if={length(@pinned_messages) > 0} class="bg-base-200 border-b border-base-300">
+      <div :if={length(@pinned_messages) > 0} class="bg-base-200 border-b border-base-300 flex-shrink-0">
         <button
           phx-click="toggle_pinned"
           class="w-full px-4 py-2 flex items-center justify-between hover:bg-base-300 transition-colors"
@@ -843,7 +853,7 @@ defmodule ElixirchatWeb.ChatLive do
         </div>
       </div>
 
-      <div class="flex-1 overflow-y-auto p-4" id="messages-container" phx-hook="ScrollToBottom">
+      <div class="flex-1 overflow-y-auto p-4 relative" id="messages-container" phx-hook="ScrollToBottom">
         <div class="max-w-2xl mx-auto space-y-4">
           <div :if={@messages == []} class="text-center py-12 text-base-content/70">
             <p>No messages yet. Say hello!</p>
@@ -1079,9 +1089,21 @@ defmodule ElixirchatWeb.ChatLive do
             </div>
           </div>
         </div>
+
+        <%!-- Scroll to bottom button --%>
+        <button
+          id="scroll-to-bottom-btn"
+          phx-click={JS.dispatch("scroll-to-bottom", to: "#messages-container")}
+          class="hidden absolute bottom-4 right-4 btn btn-circle btn-primary shadow-lg"
+          title="Scroll to bottom"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 13.5 12 21m0 0-7.5-7.5M12 21V3" />
+          </svg>
+        </button>
       </div>
 
-      <div class="bg-base-100 border-t border-base-300 p-4">
+      <div class="bg-base-100 border-t border-base-300 p-4 flex-shrink-0">
         <div class="max-w-2xl mx-auto">
           <%!-- Reply indicator above input --%>
           <div :if={@replying_to} class="bg-base-200 p-2 rounded-t-lg flex justify-between items-center mb-0 -mb-1">
@@ -1160,6 +1182,36 @@ defmodule ElixirchatWeb.ChatLive do
                   <path stroke-linecap="round" stroke-linejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13" />
                 </svg>
               </label>
+              <%!-- Emoji picker --%>
+              <div id="emoji-picker" phx-hook="EmojiPicker" class="relative self-center">
+                <button
+                  type="button"
+                  data-emoji-toggle
+                  class="btn btn-ghost btn-circle"
+                  title="Add emoji"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.182 15.182a4.5 4.5 0 0 1-6.364 0M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM9.75 9.75c0 .414-.168.75-.375.75S9 10.164 9 9.75 9.168 9 9.375 9s.375.336.375.75Zm-.375 0h.008v.015h-.008V9.75Zm5.625 0c0 .414-.168.75-.375.75s-.375-.336-.375-.75.168-.75.375-.75.375.336.375.75Zm-.375 0h.008v.015h-.008V9.75Z" />
+                  </svg>
+                </button>
+                <div data-emoji-picker class="hidden absolute bottom-12 left-0 z-50 bg-base-100 rounded-lg shadow-xl border border-base-300 w-80">
+                  <%!-- Search input --%>
+                  <div class="p-2 border-b border-base-300">
+                    <input
+                      type="text"
+                      placeholder="Search emojis..."
+                      class="input input-sm input-bordered w-full"
+                      data-emoji-search
+                    />
+                  </div>
+                  <%!-- Category tabs --%>
+                  <div class="flex border-b border-base-300 overflow-x-auto" data-category-tabs>
+                  </div>
+                  <%!-- Emoji grid --%>
+                  <div class="h-64 overflow-y-auto p-2" data-emoji-grid>
+                  </div>
+                </div>
+              </div>
               <input
                 type="text"
                 name="message"
