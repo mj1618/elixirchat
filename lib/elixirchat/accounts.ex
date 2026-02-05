@@ -62,4 +62,45 @@ defmodule Elixirchat.Accounts do
   def change_user_registration(%User{} = user, attrs \\ %{}) do
     User.registration_changeset(user, attrs)
   end
+
+  @doc """
+  Returns a changeset for changing user password.
+  """
+  def change_user_password(%User{} = user, attrs \\ %{}) do
+    User.password_changeset(user, attrs)
+  end
+
+  @doc """
+  Validates that the current password is correct.
+  """
+  def validate_current_password(%User{} = user, password) do
+    if Bcrypt.verify_pass(password, user.password_hash) do
+      {:ok, user}
+    else
+      {:error, :invalid_password}
+    end
+  end
+
+  @doc """
+  Updates the user's password.
+  Requires valid current password for verification.
+  """
+  def update_user_password(%User{} = user, current_password, attrs) do
+    case validate_current_password(user, current_password) do
+      {:ok, _user} ->
+        user
+        |> User.password_changeset(attrs)
+        |> Repo.update()
+
+      {:error, :invalid_password} ->
+        {:error, :invalid_current_password}
+    end
+  end
+
+  @doc """
+  Deletes a user account.
+  """
+  def delete_user(%User{} = user) do
+    Repo.delete(user)
+  end
 end

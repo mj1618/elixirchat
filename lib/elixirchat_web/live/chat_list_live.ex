@@ -2,6 +2,7 @@ defmodule ElixirchatWeb.ChatListLive do
   use ElixirchatWeb, :live_view
 
   alias Elixirchat.Chat
+  alias Elixirchat.Presence
 
   @impl true
   def mount(_params, _session, socket) do
@@ -9,12 +10,23 @@ defmodule ElixirchatWeb.ChatListLive do
     current_user = socket.assigns.current_user
     conversations = Chat.list_user_conversations(current_user.id)
 
+    # Track presence and subscribe to updates when connected
+    online_user_ids =
+      if connected?(socket) do
+        Presence.track_user(self(), current_user)
+        Presence.subscribe()
+        Presence.get_online_user_ids()
+      else
+        []
+      end
+
     {:ok,
      assign(socket,
        conversations: conversations,
        search_query: "",
        search_results: [],
-       show_search: false
+       show_search: false,
+       online_user_ids: online_user_ids
      )}
   end
 
@@ -40,6 +52,12 @@ defmodule ElixirchatWeb.ChatListLive do
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Could not start conversation")}
     end
+  end
+
+  @impl true
+  def handle_info(%Phoenix.Socket.Broadcast{event: "presence_diff"}, socket) do
+    # Update online user IDs when presence changes
+    {:noreply, assign(socket, online_user_ids: Presence.get_online_user_ids())}
   end
 
   @impl true
@@ -142,9 +160,13 @@ defmodule ElixirchatWeb.ChatListLive do
                   </div>
                   <div>
                     <div class="flex items-center gap-2">
+                      <div class={[
+                        "w-2.5 h-2.5 rounded-full",
+                        is_conversation_online?(conv, @current_user.id, @online_user_ids) && "bg-success" || "bg-base-content/30"
+                      ]}></div>
                       <h3 class="font-semibold">{get_conversation_name(conv, @current_user.id)}</h3>
                       <span :if={conv.type == "group"} class="badge badge-sm badge-outline">
-                        {length(conv.members)} members
+                        {get_group_online_text(conv, @online_user_ids)}
                       </span>
                     </div>
                     <p :if={conv.last_message} class="text-sm text-base-content/70 truncate max-w-xs">
@@ -201,5 +223,27 @@ defmodule ElixirchatWeb.ChatListLive do
       diff < 604_800 -> "#{div(diff, 86400)}d"
       true -> Calendar.strftime(datetime, "%b %d")
     end
+  end
+
+  # Online presence helpers
+  defp is_conversation_online?(%{type: "direct", members: members}, current_user_id, online_user_ids) do
+    # For direct chats, check if the other user is online
+    case Enum.find(members, fn m -> m.user_id != current_user_id end) do
+      nil -> false
+      member -> member.user_id in online_user_ids
+    end
+  end
+
+  defp is_conversation_online?(%{type: "group", members: members}, _current_user_id, online_user_ids) do
+    # For group chats, consider online if at least one other member is online
+    Enum.any?(members, fn m -> m.user_id in online_user_ids end)
+  end
+
+  defp is_conversation_online?(_, _, _), do: false
+
+  defp get_group_online_text(%{members: members}, online_user_ids) do
+    total = length(members)
+    online = Enum.count(members, fn m -> m.user_id in online_user_ids end)
+    "#{online}/#{total} online"
   end
 end

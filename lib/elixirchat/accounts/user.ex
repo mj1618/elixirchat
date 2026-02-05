@@ -5,6 +5,7 @@ defmodule Elixirchat.Accounts.User do
   schema "users" do
     field :username, :string
     field :password, :string, virtual: true
+    field :current_password, :string, virtual: true
     field :password_hash, :string
 
     timestamps()
@@ -21,6 +22,17 @@ defmodule Elixirchat.Accounts.User do
     |> validate_format(:username, ~r/^[a-zA-Z0-9_]+$/, message: "only letters, numbers, and underscores allowed")
     |> validate_length(:password, min: 6, max: 100)
     |> unique_constraint(:username)
+    |> hash_password()
+  end
+
+  @doc """
+  Changeset for changing password.
+  """
+  def password_changeset(user, attrs) do
+    user
+    |> cast(attrs, [:password])
+    |> validate_required([:password])
+    |> validate_length(:password, min: 6, max: 100)
     |> hash_password()
   end
 

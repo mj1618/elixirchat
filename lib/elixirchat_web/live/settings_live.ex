@@ -162,19 +162,24 @@ defmodule ElixirchatWeb.SettingsLive do
   end
 
   @impl true
-  def handle_event("validate_password", %{"password" => password_params}, socket) do
+  def handle_event("validate_password", params, socket) do
+    password_params = Map.get(params, "password", %{})
+
     changeset =
       socket.assigns.current_user
       |> Accounts.change_user_password(password_params)
       |> Map.put(:action, :validate)
 
-    current_password = Map.get(password_params, "current_password", "")
+    current_password = Map.get(params, "current_password", "")
 
     {:noreply, assign(socket, password_form: to_form(changeset, as: "password"), current_password: current_password)}
   end
 
   @impl true
-  def handle_event("change_password", %{"password" => password_params, "current_password" => current_password}, socket) do
+  def handle_event("change_password", params, socket) do
+    password_params = Map.get(params, "password", %{})
+    current_password = Map.get(params, "current_password", "")
+
     case Accounts.update_user_password(socket.assigns.current_user, current_password, password_params) do
       {:ok, _user} ->
         {:noreply,
