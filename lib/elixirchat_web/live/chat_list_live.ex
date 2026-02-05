@@ -68,7 +68,8 @@ defmodule ElixirchatWeb.ChatListLive do
         <div class="flex-1">
           <.link href="/" class="btn btn-ghost text-xl">Elixirchat</.link>
         </div>
-        <div class="flex-none gap-2">
+        <div class="flex-none gap-2 items-center flex">
+          <ElixirchatWeb.Layouts.theme_toggle />
           <span class="mr-2">Hello, <strong>{@current_user.username}</strong></span>
           <.link navigate={~p"/settings"} class="btn btn-ghost btn-sm">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
@@ -152,10 +153,14 @@ defmodule ElixirchatWeb.ChatListLive do
                 <div class="flex items-center gap-3">
                   <div class="avatar placeholder">
                     <div class={[
-                      "rounded-full w-12",
-                      conv.type == "group" && "bg-secondary text-secondary-content" || "bg-primary text-primary-content"
+                      "rounded-full w-12 h-12 flex items-center justify-center",
+                      !get_conversation_avatar(conv, @current_user.id) && (conv.type == "group" && "bg-secondary text-secondary-content" || "bg-primary text-primary-content")
                     ]}>
-                      <span class="text-lg">{get_conversation_initial(conv, @current_user.id)}</span>
+                      <%= if avatar = get_conversation_avatar(conv, @current_user.id) do %>
+                        <img src={"/uploads/avatars/#{avatar}"} alt="Avatar" class="rounded-full w-full h-full object-cover" />
+                      <% else %>
+                        <span class="text-lg">{get_conversation_initial(conv, @current_user.id)}</span>
+                      <% end %>
                     </div>
                   </div>
                   <div>
@@ -211,6 +216,17 @@ defmodule ElixirchatWeb.ChatListLive do
     |> String.first()
     |> String.upcase()
   end
+
+  # For direct conversations, returns the other user's avatar filename (if any)
+  # For groups, returns nil (groups don't have avatars)
+  defp get_conversation_avatar(%{type: "direct", members: members}, current_user_id) do
+    case Enum.find(members, fn m -> m.user_id != current_user_id end) do
+      nil -> nil
+      member -> member.user.avatar_filename
+    end
+  end
+
+  defp get_conversation_avatar(_, _), do: nil
 
   defp format_time(datetime) do
     now = NaiveDateTime.utc_now()

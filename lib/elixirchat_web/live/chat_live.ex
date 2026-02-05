@@ -65,7 +65,11 @@ defmodule ElixirchatWeb.ChatLive do
          show_mentions: false,
          mention_results: [],
          pinned_messages: pinned_messages,
-         show_pinned: false
+         show_pinned: false,
+         show_add_member: false,
+         add_member_search_query: "",
+         add_member_search_results: [],
+         show_leave_confirm: false
        )}
     else
       {:ok, redirect(socket, to: "/chats") |> put_flash(:error, "Access denied")}
@@ -188,19 +192,84 @@ defmodule ElixirchatWeb.ChatLive do
   end
 
   @impl true
-  def handle_event("leave_group", _, socket) do
-    conversation = socket.assigns.conversation
-    current_user = socket.assigns.current_user
+  def handle_event("show_leave_confirm", _, socket) do
+    {:noreply, assign(socket, show_leave_confirm: true)}
+  end
 
-    if conversation.type == "group" do
-      case Chat.remove_member_from_group(conversation.id, current_user.id) do
-        {:ok, _} ->
-          {:noreply, push_navigate(socket, to: "/chats") |> put_flash(:info, "You left the group")}
-        {:error, _} ->
-          {:noreply, put_flash(socket, :error, "Could not leave group")}
+  @impl true
+  def handle_event("cancel_leave", _, socket) do
+    {:noreply, assign(socket, show_leave_confirm: false)}
+  end
+
+  @impl true
+  def handle_event("leave_group", _, socket) do
+    conversation_id = socket.assigns.conversation.id
+    user_id = socket.assigns.current_user.id
+
+    case Chat.leave_group(conversation_id, user_id) do
+      :ok ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "You have left the group")
+         |> push_navigate(to: ~p"/chats")}
+      {:error, :cannot_leave_general} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "You cannot leave the General group")
+         |> assign(show_leave_confirm: false)}
+      {:error, _} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Could not leave the group")
+         |> assign(show_leave_confirm: false)}
+    end
+  end
+
+  # ===============================
+  # Add Member to Group Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("toggle_add_member", _, socket) do
+    {:noreply, assign(socket,
+      show_add_member: !socket.assigns.show_add_member,
+      add_member_search_query: "",
+      add_member_search_results: []
+    )}
+  end
+
+  @impl true
+  def handle_event("search_members_to_add", %{"query" => query}, socket) do
+    results =
+      if String.length(query) >= 2 do
+        Chat.search_users_not_in_conversation(query, socket.assigns.conversation.id)
+      else
+        []
       end
-    else
-      {:noreply, socket}
+
+    {:noreply, assign(socket,
+      add_member_search_query: query,
+      add_member_search_results: results
+    )}
+  end
+
+  @impl true
+  def handle_event("add_member_to_group", %{"user-id" => user_id}, socket) do
+    conversation_id = socket.assigns.conversation.id
+    user_id = String.to_integer(user_id)
+
+    case Chat.add_member_to_group(conversation_id, user_id) do
+      {:ok, member} ->
+        # Broadcast to all conversation members
+        Chat.broadcast_member_added(conversation_id, member)
+
+        {:noreply,
+         socket
+         |> put_flash(:info, "Member added successfully")
+         |> assign(show_add_member: false, add_member_search_results: [], add_member_search_query: "")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not add member")}
     end
   end
 
@@ -548,6 +617,36 @@ defmodule ElixirchatWeb.ChatLive do
      end)}
   end
 
+  @impl true
+  def handle_info({:member_added, member}, socket) do
+    # Update members list with the new member
+    {:noreply,
+     update(socket, :members, fn members ->
+       if Enum.any?(members, fn m -> m.id == member.user.id end) do
+         members
+       else
+         members ++ [member.user]
+       end
+     end)}
+  end
+
+  @impl true
+  def handle_info({:member_left, user_id}, socket) do
+    if user_id == socket.assigns.current_user.id do
+      # Current user was removed (maybe kicked), redirect away
+      {:noreply,
+       socket
+       |> put_flash(:info, "You have been removed from this group")
+       |> push_navigate(to: ~p"/chats")}
+    else
+      # Someone else left, update members list
+      {:noreply,
+       update(socket, :members, fn members ->
+         Enum.reject(members, fn m -> m.id == user_id end)
+       end)}
+    end
+  end
+
   # ===============================
   # Read Receipt Handlers
   # ===============================
@@ -698,10 +797,14 @@ defmodule ElixirchatWeb.ChatLive do
           <div class="flex items-center gap-3">
             <div class="avatar placeholder">
               <div class={[
-                "rounded-full w-10 flex items-center justify-center",
-                @conversation.type == "group" && "bg-secondary text-secondary-content" || "bg-primary text-primary-content"
+                "rounded-full w-10 h-10 flex items-center justify-center",
+                !get_conversation_avatar(@conversation, @current_user.id) && (@conversation.type == "group" && "bg-secondary text-secondary-content" || "bg-primary text-primary-content")
               ]}>
-                <span>{get_conversation_initial(@conversation, @current_user.id)}</span>
+                <%= if avatar = get_conversation_avatar(@conversation, @current_user.id) do %>
+                  <img src={"/uploads/avatars/#{avatar}"} alt="Avatar" class="rounded-full w-full h-full object-cover" />
+                <% else %>
+                  <span>{get_conversation_initial(@conversation, @current_user.id)}</span>
+                <% end %>
               </div>
             </div>
             <div>
@@ -724,6 +827,8 @@ defmodule ElixirchatWeb.ChatLive do
           </div>
         </div>
         <div class="flex-none flex items-center gap-2">
+          <%!-- Theme toggle --%>
+          <ElixirchatWeb.Layouts.theme_toggle />
           <%!-- Search button --%>
           <button phx-click="toggle_search" class="btn btn-ghost btn-sm" title="Search messages">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
@@ -736,7 +841,7 @@ defmodule ElixirchatWeb.ChatLive do
                 <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
               </svg>
             </div>
-            <ul :if={@show_members} tabindex="0" class="dropdown-content menu bg-base-100 rounded-box z-[1] w-52 p-2 shadow">
+            <ul :if={@show_members} tabindex="0" class="dropdown-content menu bg-base-100 rounded-box z-[1] w-64 p-2 shadow">
               <li class="menu-title">Members</li>
               <li :for={member <- @members}>
                 <span class={["flex items-center gap-2", member.id == @current_user.id && "font-bold" || ""]}>
@@ -748,15 +853,88 @@ defmodule ElixirchatWeb.ChatLive do
                   <span :if={member.id == @current_user.id} class="badge badge-xs badge-primary ml-1">you</span>
                 </span>
               </li>
+              <%!-- Add Member section --%>
               <div class="divider my-1"></div>
-              <li>
-                <button phx-click="leave_group" class="text-error">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+              <div class="p-2">
+                <button
+                  :if={!@show_add_member}
+                  phx-click="toggle_add_member"
+                  class="btn btn-sm btn-primary w-full"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 mr-1">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M19 7.5v3m0 0v3m0-3h3m-3 0h-3m-2.25-4.125a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0ZM4 19.235v-.11a6.375 6.375 0 0 1 12.75 0v.109A12.318 12.318 0 0 1 10.374 21c-2.331 0-4.512-.645-6.374-1.766Z" />
+                  </svg>
+                  Add Member
+                </button>
+
+                <div :if={@show_add_member} class="space-y-2">
+                  <form phx-change="search_members_to_add" phx-submit="search_members_to_add">
+                    <input
+                      type="text"
+                      name="query"
+                      value={@add_member_search_query}
+                      placeholder="Search by username..."
+                      class="input input-sm input-bordered w-full"
+                      phx-debounce="300"
+                      autofocus
+                    />
+                  </form>
+
+                  <div :if={@add_member_search_results != []} class="max-h-40 overflow-y-auto space-y-1">
+                    <div
+                      :for={user <- @add_member_search_results}
+                      class="flex items-center justify-between p-2 bg-base-200 rounded"
+                    >
+                      <span class="text-sm font-medium">{user.username}</span>
+                      <button
+                        phx-click="add_member_to_group"
+                        phx-value-user-id={user.id}
+                        class="btn btn-xs btn-primary"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  </div>
+
+                  <p :if={@add_member_search_query != "" && String.length(@add_member_search_query) >= 2 && @add_member_search_results == []} class="text-xs text-base-content/70 text-center py-2">
+                    No users found
+                  </p>
+
+                  <p :if={@add_member_search_query != "" && String.length(@add_member_search_query) < 2} class="text-xs text-base-content/70 text-center py-2">
+                    Enter at least 2 characters
+                  </p>
+
+                  <button phx-click="toggle_add_member" class="btn btn-sm btn-ghost w-full">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+              <%!-- Leave Group section - hidden for General group --%>
+              <div :if={!@conversation.is_general} class="p-2 border-t border-base-300">
+                <button
+                  :if={!@show_leave_confirm}
+                  phx-click="show_leave_confirm"
+                  class="btn btn-sm btn-error btn-outline w-full"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 mr-1">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3 0 3-3m0 0-3-3m3 3H9" />
                   </svg>
                   Leave Group
                 </button>
-              </li>
+
+                <%!-- Leave confirmation dialog --%>
+                <div :if={@show_leave_confirm} class="space-y-2">
+                  <p class="text-sm text-warning">Are you sure you want to leave this group?</p>
+                  <div class="flex gap-2">
+                    <button phx-click="leave_group" class="btn btn-sm btn-error flex-1">
+                      Leave
+                    </button>
+                    <button phx-click="cancel_leave" class="btn btn-sm btn-ghost flex-1">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
             </ul>
           </div>
           <span class="text-sm text-base-content/70">{@current_user.username}</span>
@@ -867,10 +1045,14 @@ defmodule ElixirchatWeb.ChatLive do
           >
             <div class="chat-image avatar placeholder">
               <div class={[
-                "w-10 rounded-full text-white font-bold flex items-center justify-center",
-                get_avatar_class(message)
+                "w-10 h-10 rounded-full text-white font-bold flex items-center justify-center",
+                !message.sender.avatar_filename && get_avatar_class(message)
               ]}>
-                <span class="text-lg">{get_sender_initial(message)}</span>
+                <%= if message.sender.avatar_filename do %>
+                  <img src={"/uploads/avatars/#{message.sender.avatar_filename}"} alt={message.sender.username} class="rounded-full w-full h-full object-cover" />
+                <% else %>
+                  <span class="text-lg">{get_sender_initial(message)}</span>
+                <% end %>
               </div>
             </div>
             <div class="chat-header">
@@ -1165,8 +1347,12 @@ defmodule ElixirchatWeb.ChatLive do
                     class="flex items-center gap-2"
                   >
                     <div class="avatar placeholder">
-                      <div class="bg-neutral text-neutral-content rounded-full w-6 flex items-center justify-center">
-                        <span class="text-xs">{String.first(user.username) |> String.upcase()}</span>
+                      <div class={["rounded-full w-6 h-6 flex items-center justify-center", !user.avatar_filename && "bg-neutral text-neutral-content"]}>
+                        <%= if user.avatar_filename do %>
+                          <img src={"/uploads/avatars/#{user.avatar_filename}"} alt={user.username} class="rounded-full w-full h-full object-cover" />
+                        <% else %>
+                          <span class="text-xs">{String.first(user.username) |> String.upcase()}</span>
+                        <% end %>
                       </div>
                     </div>
                     <span>@{user.username}</span>
@@ -1280,6 +1466,17 @@ defmodule ElixirchatWeb.ChatLive do
     |> String.upcase()
   end
 
+  # For direct conversations, returns the other user's avatar filename (if any)
+  # For groups, returns nil (groups don't have avatars)
+  defp get_conversation_avatar(%{type: "direct", members: members}, current_user_id) do
+    case Enum.find(members, fn m -> m.user_id != current_user_id end) do
+      nil -> nil
+      member -> member.user.avatar_filename
+    end
+  end
+
+  defp get_conversation_avatar(_, _), do: nil
+
   defp format_time(datetime) do
     Calendar.strftime(datetime, "%I:%M %p")
   end
@@ -1298,7 +1495,7 @@ defmodule ElixirchatWeb.ChatLive do
 
   defp get_bubble_class(message, current_user_id) do
     cond do
-      is_agent_message?(message) -> "chat-bubble-secondary"
+      is_agent_message?(message) -> "chat-bubble-info"
       message.sender_id == current_user_id -> "chat-bubble-primary"
       true -> ""
     end
@@ -1306,7 +1503,7 @@ defmodule ElixirchatWeb.ChatLive do
 
   defp get_avatar_class(message) do
     if is_agent_message?(message) do
-      "bg-secondary"
+      "bg-info"
     else
       "bg-primary"
     end

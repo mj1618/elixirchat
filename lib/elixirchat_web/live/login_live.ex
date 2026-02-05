@@ -7,7 +7,11 @@ defmodule ElixirchatWeb.LoginLive do
 
   def render(assigns) do
     ~H"""
-    <div class="min-h-screen flex items-center justify-center bg-base-200">
+    <div class="min-h-screen flex items-center justify-center bg-base-200 relative">
+      <%!-- Theme toggle in corner --%>
+      <div class="absolute top-4 right-4">
+        <ElixirchatWeb.Layouts.theme_toggle />
+      </div>
       <div class="card w-full max-w-md bg-base-100 shadow-xl">
         <div class="card-body">
           <h2 class="card-title text-2xl font-bold justify-center">Welcome Back</h2>
