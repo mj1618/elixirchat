@@ -14,9 +14,11 @@ If no tasks are found - skip the "Execute the task" step and go to the "If nothi
 
 # Implement the task
 
-Then read the file and execute the task to completion, adding tests and testing when you think you need to.
+Then read the file and execute the task to completion, adding tests and testing when you think you need to - including (and most importantly) testing with a browser using playwright-cli.
+
 When done, rename the file to ".completed.md" and add a note about what you did.
 If you can\'t complete the task, rename the file to ".pending.md" and add a note about what went wrong to the file.
+
 When you\'re done, `git add .`, `git commit -m "a suitable message` and `git push` your changes to the remote repository.
 
 # If nothing to do
