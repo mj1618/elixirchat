@@ -41,6 +41,7 @@ defmodule ElixirchatWeb.Router do
       on_mount: [{ElixirchatWeb.Plugs.Auth, :ensure_authenticated}] do
       live "/chats", ChatListLive
       live "/chats/:id", ChatLive
+      live "/groups/new", GroupNewLive
       live "/settings", SettingsLive
     end
   end

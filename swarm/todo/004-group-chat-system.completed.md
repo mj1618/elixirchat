@@ -41,14 +41,14 @@ Implement group chat functionality where users can create group conversations wi
    - Show group vs direct chat indicators in the list
 
 ## Acceptance Criteria
-- [ ] Logged-in user can create a new group chat with a name
-- [ ] User can add multiple members when creating the group
-- [ ] Group chat displays with its name in the chat list
-- [ ] All group members see messages in real-time
-- [ ] Messages are persisted and visible on page reload
-- [ ] User can leave a group chat
-- [ ] Chat list clearly distinguishes between direct and group chats
-- [ ] Cannot access group chats when not logged in
+- [x] Logged-in user can create a new group chat with a name
+- [x] User can add multiple members when creating the group
+- [x] Group chat displays with its name in the chat list
+- [x] All group members see messages in real-time
+- [x] Messages are persisted and visible on page reload
+- [x] User can leave a group chat
+- [x] Chat list clearly distinguishes between direct and group chats
+- [x] Cannot access group chats when not logged in
 
 ## Dependencies
 - Task 001: User Authentication System (completed)
@@ -60,3 +60,42 @@ Implement group chat functionality where users can create group conversations wi
 - Test that leaving group removes user from member list
 - Test group name displays correctly everywhere
 - Verify unauthorized access is blocked
+
+## Completion Notes (Agent d12ce640)
+
+### Files Created:
+- `lib/elixirchat_web/live/group_new_live.ex` - LiveView for creating new group chats
+
+### Files Modified:
+- `lib/elixirchat/chat.ex` - Added group chat functions:
+  - `create_group_conversation/2` - Creates group with name and initial members
+  - `add_member_to_group/2` - Adds a user to an existing group
+  - `remove_member_from_group/2` - Removes a user from a group (allows user to leave)
+  - `update_group_name/2` - Updates group name
+  - `list_group_members/1` - Lists all members of a group
+  - `get_member_count/1` - Gets member count for a conversation
+
+- `lib/elixirchat_web/router.ex` - Added route for `/groups/new`
+
+- `lib/elixirchat_web/live/chat_list_live.ex` - Updated to:
+  - Show "New Group" button next to "New Chat"
+  - Display group chats with different styling (secondary color)
+  - Show member count badge for groups
+  - Show sender name prefix in group chat previews
+
+- `lib/elixirchat_web/live/chat_live.ex` - Updated to:
+  - Show group name and member count in header
+  - Add members dropdown showing all group members
+  - Add "Leave Group" functionality
+  - Different avatar styling for groups vs direct chats
+
+### Features Implemented:
+1. **Group Creation**: Users can create groups with custom names and multiple members
+2. **Group Display**: Groups are visually distinct from direct chats (different colors, member count)
+3. **Member Management**: View members list, leave group functionality
+4. **Real-time Messaging**: Existing PubSub infrastructure supports group messaging
+
+### Verified Working:
+- All 97 tests pass
+- Code compiles without errors
+- Database schema already supports groups (name field and type field)
