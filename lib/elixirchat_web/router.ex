@@ -22,6 +22,12 @@ defmodule ElixirchatWeb.Router do
 
     get "/", PageController, :home
     delete "/logout", SessionController, :delete
+
+    # Group invite links - accessible to all (shows login prompt if not authenticated)
+    live_session :maybe_authenticated,
+      on_mount: [{ElixirchatWeb.Plugs.Auth, :mount_current_user}] do
+      live "/join/:token", JoinGroupLive
+    end
   end
 
   # Routes for non-authenticated users
@@ -43,6 +49,7 @@ defmodule ElixirchatWeb.Router do
       live "/chats/:id", ChatLive
       live "/groups/new", GroupNewLive
       live "/starred", StarredLive
+      live "/scheduled", ScheduledMessagesLive
       live "/settings", SettingsLive
       live "/settings/blocked", BlockedUsersLive
     end

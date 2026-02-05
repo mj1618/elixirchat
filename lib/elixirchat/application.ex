@@ -16,6 +16,8 @@ defmodule Elixirchat.Application do
       Elixirchat.Presence,
       # Task supervisor for async operations (e.g., AI agent responses)
       {Task.Supervisor, name: Elixirchat.TaskSupervisor},
+      # Worker for processing scheduled messages
+      Elixirchat.Chat.ScheduledMessageWorker,
       # Start to serve requests, typically the last entry
       ElixirchatWeb.Endpoint,
       # Ensure General conversation exists (runs after Repo is started)

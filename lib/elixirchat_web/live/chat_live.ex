@@ -1769,17 +1769,75 @@ defmodule ElixirchatWeb.ChatLive do
                 <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
               </svg>
             </div>
-            <ul :if={@show_members} tabindex="0" class="dropdown-content menu bg-base-100 rounded-box z-[1] w-64 p-2 shadow">
+            <ul :if={@show_members} tabindex="0" class="dropdown-content menu bg-base-100 rounded-box z-[1] w-72 p-2 shadow">
               <li class="menu-title">Members</li>
-              <li :for={member <- @members}>
-                <span class={["flex items-center gap-2", member.id == @current_user.id && "font-bold" || ""]}>
-                  <div class={[
-                    "w-2 h-2 rounded-full flex-shrink-0",
-                    member.id in @online_user_ids && "bg-success" || "bg-base-content/30"
-                  ]}></div>
-                  {member.username}
-                  <span :if={member.id == @current_user.id} class="badge badge-xs badge-primary ml-1">you</span>
-                </span>
+              <li :for={member <- @members} class="relative">
+                <div class="flex items-center justify-between w-full py-1">
+                  <span class={["flex items-center gap-2 flex-1 min-w-0", member.id == @current_user.id && "font-bold" || ""]}>
+                    <div class={[
+                      "w-2 h-2 rounded-full flex-shrink-0",
+                      member.id in @online_user_ids && "bg-success" || "bg-base-content/30"
+                    ]}></div>
+                    <span class="truncate">{member.username}</span>
+                    <span :if={member.id == @current_user.id} class="badge badge-xs badge-primary flex-shrink-0">you</span>
+                    <span :if={Map.get(member, :role) == "owner"} class="badge badge-xs badge-warning flex-shrink-0">Owner</span>
+                    <span :if={Map.get(member, :role) == "admin"} class="badge badge-xs badge-secondary flex-shrink-0">Admin</span>
+                  </span>
+                  <%!-- Admin controls dropdown --%>
+                  <div :if={@current_user_role in ["owner", "admin"] && member.id != @current_user.id && !@conversation.is_general}>
+                    <button
+                      phx-click="show_member_menu"
+                      phx-value-user-id={member.id}
+                      class="btn btn-ghost btn-xs btn-circle"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.75a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5ZM12 12.75a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5ZM12 18.75a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5Z" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <%!-- Member action menu --%>
+                <div :if={@show_member_menu == member.id} class="absolute right-0 top-full z-50 mt-1 w-48 bg-base-200 rounded-box shadow-lg border border-base-300">
+                  <ul class="menu menu-sm p-2">
+                    <%!-- Kick member (owner can kick anyone, admin can only kick members) --%>
+                    <li :if={can_kick_member?(@current_user_role, Map.get(member, :role))}>
+                      <button phx-click="kick_member" phx-value-user-id={member.id} class="text-error">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M22 10.5h-6m-2.25-4.125a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0ZM4 19.235v-.11a6.375 6.375 0 0 1 12.75 0v.109A12.318 12.318 0 0 1 10.374 21c-2.331 0-4.512-.645-6.374-1.766Z" />
+                        </svg>
+                        Remove from group
+                      </button>
+                    </li>
+                    <%!-- Promote to admin (owner only, for regular members) --%>
+                    <li :if={@current_user_role == "owner" && Map.get(member, :role) == "member"}>
+                      <button phx-click="promote_member" phx-value-user-id={member.id}>
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                        </svg>
+                        Make admin
+                      </button>
+                    </li>
+                    <%!-- Demote from admin (owner only, for admins) --%>
+                    <li :if={@current_user_role == "owner" && Map.get(member, :role) == "admin"}>
+                      <button phx-click="demote_member" phx-value-user-id={member.id}>
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="m9.75 9.75 4.5 4.5m0-4.5-4.5 4.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                        </svg>
+                        Remove admin
+                      </button>
+                    </li>
+                    <%!-- Transfer ownership (owner only) --%>
+                    <li :if={@current_user_role == "owner"}>
+                      <button phx-click="show_transfer_confirm" phx-value-user-id={member.id}>
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+                        </svg>
+                        Transfer ownership
+                      </button>
+                    </li>
+                  </ul>
+                  <button phx-click="hide_member_menu" class="btn btn-ghost btn-xs w-full mt-1">Cancel</button>
+                </div>
               </li>
               <%!-- Add Member section --%>
               <div class="divider my-1"></div>
@@ -1839,8 +1897,13 @@ defmodule ElixirchatWeb.ChatLive do
               </div>
               <%!-- Leave Group section - hidden for General group --%>
               <div :if={!@conversation.is_general} class="p-2 border-t border-base-300">
+                <%!-- Owner warning - they must transfer ownership first --%>
+                <div :if={@current_user_role == "owner" && !@show_transfer_confirm} class="text-xs text-base-content/60 mb-2">
+                  <span class="text-warning">As the owner, you must transfer ownership before leaving.</span>
+                </div>
+
                 <button
-                  :if={!@show_leave_confirm}
+                  :if={!@show_leave_confirm && @current_user_role != "owner"}
                   phx-click="show_leave_confirm"
                   class="btn btn-sm btn-error btn-outline w-full"
                 >
@@ -1858,6 +1921,19 @@ defmodule ElixirchatWeb.ChatLive do
                       Leave
                     </button>
                     <button phx-click="cancel_leave" class="btn btn-sm btn-ghost flex-1">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+
+                <%!-- Transfer ownership confirmation dialog --%>
+                <div :if={@show_transfer_confirm} class="space-y-2">
+                  <p class="text-sm text-warning">Transfer ownership to this member? You will become an admin.</p>
+                  <div class="flex gap-2">
+                    <button phx-click="transfer_ownership" class="btn btn-sm btn-warning flex-1">
+                      Transfer
+                    </button>
+                    <button phx-click="cancel_transfer" class="btn btn-sm btn-ghost flex-1">
                       Cancel
                     </button>
                   </div>
@@ -2732,6 +2808,115 @@ defmodule ElixirchatWeb.ChatLive do
         </div>
         <div class="modal-backdrop bg-base-content/50" phx-click="close_schedule_modal"></div>
       </div>
+
+      <%!-- Thread panel (slides in from right) --%>
+      <div :if={@show_thread && @thread_parent_message} class="fixed inset-y-0 right-0 w-full sm:w-96 bg-base-100 shadow-xl z-50 flex flex-col border-l border-base-300">
+        <%!-- Thread header --%>
+        <div class="flex items-center justify-between p-4 border-b border-base-300">
+          <div class="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
+            </svg>
+            <span class="font-semibold">Thread</span>
+            <span class="text-sm text-base-content/60">{length(@thread_replies)} {if length(@thread_replies) == 1, do: "reply", else: "replies"}</span>
+          </div>
+          <button phx-click="close_thread" class="btn btn-ghost btn-sm btn-circle">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <%!-- Parent message --%>
+        <div class="p-4 border-b border-base-300 bg-base-200/50">
+          <div class="flex items-start gap-3">
+            <div class="avatar avatar-placeholder flex-shrink-0">
+              <div class={[
+                "w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-sm",
+                !@thread_parent_message.sender.avatar_filename && "bg-primary"
+              ]}>
+                <%= if @thread_parent_message.sender.avatar_filename do %>
+                  <img src={"/uploads/avatars/#{@thread_parent_message.sender.avatar_filename}"} alt={@thread_parent_message.sender.username} class="rounded-full w-full h-full object-cover" />
+                <% else %>
+                  {String.first(@thread_parent_message.sender.username) |> String.upcase()}
+                <% end %>
+              </div>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="font-semibold text-sm">{@thread_parent_message.sender.username}</span>
+                <span class="text-xs text-base-content/50">{format_time(@thread_parent_message.inserted_at)}</span>
+              </div>
+              <p class="text-sm mt-1 break-words">
+                <%= raw(format_message_content(@thread_parent_message.content, @members)) %>
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <%!-- Thread replies --%>
+        <div class="flex-1 overflow-y-auto p-4 space-y-4" id="thread-replies-container">
+          <div :if={@thread_replies == []} class="text-center text-base-content/50 py-8">
+            <p>No replies yet. Start the conversation!</p>
+          </div>
+
+          <div :for={reply <- @thread_replies} class="flex items-start gap-3">
+            <div class="avatar avatar-placeholder flex-shrink-0">
+              <div class={[
+                "w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-sm",
+                !reply.user.avatar_filename && (reply.user_id == @current_user.id && "bg-secondary" || "bg-primary")
+              ]}>
+                <%= if reply.user.avatar_filename do %>
+                  <img src={"/uploads/avatars/#{reply.user.avatar_filename}"} alt={reply.user.username} class="rounded-full w-full h-full object-cover" />
+                <% else %>
+                  {String.first(reply.user.username) |> String.upcase()}
+                <% end %>
+              </div>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class={["font-semibold text-sm", reply.user_id == @current_user.id && "text-secondary"]}>
+                  {reply.user.username}
+                </span>
+                <span class="text-xs text-base-content/50">{format_time(reply.inserted_at)}</span>
+                <span :if={reply.also_sent_to_channel} class="badge badge-xs badge-ghost">also in chat</span>
+              </div>
+              <p class="text-sm mt-1 break-words">
+                <%= raw(format_message_content(reply.content, @members)) %>
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <%!-- Thread reply input --%>
+        <div class="p-4 border-t border-base-300">
+          <form phx-submit="send_thread_reply" class="space-y-2">
+            <div class="flex gap-2">
+              <input
+                type="text"
+                name="content"
+                value={@thread_input}
+                phx-change="update_thread_input"
+                placeholder="Reply in thread..."
+                class="input input-bordered flex-1"
+                autocomplete="off"
+              />
+              <button type="submit" class="btn btn-primary" disabled={String.trim(@thread_input) == ""}>
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
+                </svg>
+              </button>
+            </div>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" name="also_send_to_channel" value="true" class="checkbox checkbox-sm" />
+              <span class="text-xs text-base-content/70">Also send to channel</span>
+            </label>
+          </form>
+        </div>
+      </div>
+
+      <%!-- Thread panel backdrop --%>
+      <div :if={@show_thread} class="fixed inset-0 bg-base-content/30 z-40" phx-click="close_thread"></div>
     </div>
     """
   end
@@ -2940,6 +3125,13 @@ defmodule ElixirchatWeb.ChatLive do
   defp can_unpin?(user_id, pinned) do
     pinned.pinned_by_id == user_id || pinned.message.sender_id == user_id
   end
+
+  # Checks if kicker can kick the target based on roles
+  # Owner can kick anyone (except owner - handled in backend)
+  # Admin can only kick regular members
+  defp can_kick_member?("owner", _target_role), do: true
+  defp can_kick_member?("admin", "member"), do: true
+  defp can_kick_member?(_, _), do: false
 
   # Checks if user has voted for a specific poll option
   defp user_voted_for_option?(poll_id, option_id, user_poll_votes) do
