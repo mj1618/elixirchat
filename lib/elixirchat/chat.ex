@@ -6,7 +6,7 @@ defmodule Elixirchat.Chat do
   import Ecto.Query, warn: false
 
   alias Elixirchat.Repo
-  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt}
+  alias Elixirchat.Chat.{Conversation, ConversationMember, Message, Reaction, ReadReceipt, Attachment, Mentions, PinnedMessage}
   alias Elixirchat.Accounts.User
   alias Elixirchat.Agent
 
@@ -137,7 +137,7 @@ defmodule Elixirchat.Chat do
       from m in Message,
         where: m.conversation_id == ^conversation_id,
         order_by: [asc: m.inserted_at],
-        preload: [:sender, reply_to: :sender]
+        preload: [:sender, :attachments, reply_to: :sender]
 
     query =
       if before_id do
@@ -163,10 +163,12 @@ defmodule Elixirchat.Chat do
 
   @doc """
   Sends a message in a conversation.
-  Accepts optional opts with :reply_to_id for replying to a specific message.
+  Accepts optional opts with :reply_to_id for replying to a specific message,
+  and :attachments for file attachments.
   """
   def send_message(conversation_id, sender_id, content, opts \\ []) do
     reply_to_id = Keyword.get(opts, :reply_to_id)
+    attachments = Keyword.get(opts, :attachments, [])
 
     # Validate reply_to if provided
     if reply_to_id do
@@ -174,14 +176,14 @@ defmodule Elixirchat.Chat do
       if is_nil(reply_to) or reply_to.conversation_id != conversation_id do
         {:error, :invalid_reply_to}
       else
-        do_send_message(conversation_id, sender_id, content, reply_to_id)
+        do_send_message(conversation_id, sender_id, content, reply_to_id, attachments)
       end
     else
-      do_send_message(conversation_id, sender_id, content, nil)
+      do_send_message(conversation_id, sender_id, content, nil, attachments)
     end
   end
 
-  defp do_send_message(conversation_id, sender_id, content, reply_to_id) do
+  defp do_send_message(conversation_id, sender_id, content, reply_to_id, attachments) do
     attrs = %{
       content: content,
       conversation_id: conversation_id,
@@ -197,15 +199,22 @@ defmodule Elixirchat.Chat do
 
     case result do
       {:ok, message} ->
+        # Create attachments if any
+        Enum.each(attachments, fn attachment_data ->
+          %Attachment{}
+          |> Attachment.changeset(Map.put(attachment_data, :message_id, message.id))
+          |> Repo.insert!()
+        end)
+
         # Update conversation's updated_at timestamp
         Repo.get!(Conversation, conversation_id)
         |> Ecto.Changeset.change(%{updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)})
         |> Repo.update()
 
-        # Preload sender and reply_to for the response, add empty reactions
+        # Preload sender, reply_to, and attachments for the response, add empty reactions
         message =
           message
-          |> Repo.preload([:sender, reply_to: :sender])
+          |> Repo.preload([:sender, :attachments, reply_to: :sender], force: true)
           |> Map.put(:reactions_grouped, %{})
 
         # Broadcast the message
@@ -663,6 +672,265 @@ defmodule Elixirchat.Chat do
       Elixirchat.PubSub,
       "conversation:#{conversation_id}",
       {:reaction_updated, reaction_data}
+    )
+  end
+
+  # ===============================
+  # Read Receipt Functions
+  # ===============================
+
+  @doc """
+  Marks messages as read by a user.
+  Takes a list of message IDs and creates read receipts for ones not already read.
+  Broadcasts the read event to all conversation members.
+  """
+  def mark_messages_read(conversation_id, user_id, message_ids) when is_list(message_ids) and message_ids != [] do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    # Get message IDs that user hasn't already read
+    existing_read =
+      from(r in ReadReceipt,
+        where: r.user_id == ^user_id and r.message_id in ^message_ids,
+        select: r.message_id
+      )
+      |> Repo.all()
+      |> MapSet.new()
+
+    new_message_ids = Enum.reject(message_ids, &MapSet.member?(existing_read, &1))
+
+    if new_message_ids != [] do
+      entries =
+        Enum.map(new_message_ids, fn msg_id ->
+          %{
+            message_id: msg_id,
+            user_id: user_id,
+            read_at: now,
+            inserted_at: now,
+            updated_at: now
+          }
+        end)
+
+      Repo.insert_all(ReadReceipt, entries, on_conflict: :nothing)
+      broadcast_messages_read(conversation_id, user_id, new_message_ids)
+    end
+
+    :ok
+  end
+
+  def mark_messages_read(_, _, _), do: :ok
+
+  @doc """
+  Gets read receipts for a list of message IDs.
+  Returns a map of message_id => list of user_ids who have read it.
+  """
+  def get_read_receipts_for_messages(message_ids) when is_list(message_ids) do
+    from(r in ReadReceipt,
+      where: r.message_id in ^message_ids,
+      select: {r.message_id, r.user_id}
+    )
+    |> Repo.all()
+    |> Enum.group_by(fn {msg_id, _} -> msg_id end, fn {_, user_id} -> user_id end)
+  end
+
+  def get_read_receipts_for_messages(_), do: %{}
+
+  @doc """
+  Gets the list of users who have read a specific message.
+  """
+  def get_message_readers(message_id) do
+    from(r in ReadReceipt,
+      where: r.message_id == ^message_id,
+      join: u in assoc(r, :user),
+      select: u,
+      order_by: [asc: r.read_at]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Checks if a message has been read by the recipient in a direct conversation.
+  Returns true if the other user (not the sender) has read the message.
+  """
+  def message_read_by_other?(message_id, sender_id) do
+    from(r in ReadReceipt,
+      where: r.message_id == ^message_id and r.user_id != ^sender_id
+    )
+    |> Repo.exists?()
+  end
+
+  @doc """
+  Broadcasts that messages have been read by a user.
+  """
+  def broadcast_messages_read(conversation_id, user_id, message_ids) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      {:messages_read, %{user_id: user_id, message_ids: message_ids}}
+    )
+  end
+
+  # ===============================
+  # Mention Functions
+  # ===============================
+
+  @doc """
+  Gets users that can be mentioned in a conversation.
+  Filters by search term and returns matching users.
+  """
+  defdelegate get_mentionable_users(conversation_id, search_term), to: Mentions
+
+  @doc """
+  Renders message content with highlighted mentions.
+  """
+  defdelegate render_with_mentions(content, conversation_id), to: Mentions
+
+  # ===============================
+  # File Attachment Functions
+  # ===============================
+
+  @doc """
+  Returns the path to the uploads directory.
+  Creates the directory if it doesn't exist.
+  """
+  def uploads_dir do
+    dir = Path.join([:code.priv_dir(:elixirchat), "static", "uploads"])
+    File.mkdir_p!(dir)
+    dir
+  end
+
+  @doc """
+  Gets an attachment by ID.
+  """
+  def get_attachment!(id) do
+    Repo.get!(Attachment, id)
+  end
+
+  # ===============================
+  # Message Pinning Functions
+  # ===============================
+
+  @doc """
+  Pins a message in a conversation.
+  Returns {:ok, pinned_message} or {:error, reason}.
+  Errors: :pin_limit_reached, :invalid_message, :already_pinned, :message_deleted
+  """
+  def pin_message(conversation_id, message_id, user_id) do
+    # Check pin limit
+    current_pin_count =
+      from(p in PinnedMessage, where: p.conversation_id == ^conversation_id, select: count(p.id))
+      |> Repo.one()
+
+    if current_pin_count >= PinnedMessage.max_pins_per_conversation() do
+      {:error, :pin_limit_reached}
+    else
+      # Get and verify the message
+      case Repo.get(Message, message_id) do
+        nil ->
+          {:error, :invalid_message}
+
+        message ->
+          cond do
+            message.conversation_id != conversation_id ->
+              {:error, :invalid_message}
+
+            message.deleted_at != nil ->
+              {:error, :message_deleted}
+
+            true ->
+              result =
+                %PinnedMessage{}
+                |> PinnedMessage.changeset(%{
+                  message_id: message_id,
+                  conversation_id: conversation_id,
+                  pinned_by_id: user_id,
+                  pinned_at: DateTime.utc_now() |> DateTime.truncate(:second)
+                })
+                |> Repo.insert()
+
+              case result do
+                {:ok, pinned} ->
+                  pinned = Repo.preload(pinned, [message: :sender, pinned_by: []])
+                  broadcast_pin_update(conversation_id, {:message_pinned, pinned})
+                  {:ok, pinned}
+
+                {:error, changeset} ->
+                  if changeset.errors[:message_id] do
+                    {:error, :already_pinned}
+                  else
+                    {:error, changeset}
+                  end
+              end
+          end
+      end
+    end
+  end
+
+  @doc """
+  Unpins a message. Only the pinner or message author can unpin.
+  Returns :ok or {:error, reason}.
+  """
+  def unpin_message(message_id, user_id) do
+    pinned = Repo.get_by(PinnedMessage, message_id: message_id)
+
+    case pinned do
+      nil ->
+        {:error, :not_pinned}
+
+      pinned ->
+        message = Repo.get!(Message, message_id)
+
+        # Only pinner or message author can unpin
+        if pinned.pinned_by_id == user_id || message.sender_id == user_id do
+          conversation_id = pinned.conversation_id
+          {:ok, _} = Repo.delete(pinned)
+          broadcast_pin_update(conversation_id, {:message_unpinned, message_id})
+          :ok
+        else
+          {:error, :not_authorized}
+        end
+    end
+  end
+
+  @doc """
+  Lists all pinned messages for a conversation, ordered by most recently pinned first.
+  """
+  def list_pinned_messages(conversation_id) do
+    from(p in PinnedMessage,
+      where: p.conversation_id == ^conversation_id,
+      preload: [message: :sender, pinned_by: []],
+      order_by: [desc: p.pinned_at]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Checks if a specific message is pinned.
+  """
+  def is_message_pinned?(message_id) do
+    from(p in PinnedMessage, where: p.message_id == ^message_id)
+    |> Repo.exists?()
+  end
+
+  @doc """
+  Gets pinned message IDs for a conversation as a MapSet for fast lookup.
+  """
+  def get_pinned_message_ids(conversation_id) do
+    from(p in PinnedMessage,
+      where: p.conversation_id == ^conversation_id,
+      select: p.message_id
+    )
+    |> Repo.all()
+    |> MapSet.new()
+  end
+
+  @doc """
+  Broadcasts pin/unpin updates to conversation subscribers.
+  """
+  def broadcast_pin_update(conversation_id, event) do
+    Phoenix.PubSub.broadcast(
+      Elixirchat.PubSub,
+      "conversation:#{conversation_id}",
+      event
     )
   end
 end

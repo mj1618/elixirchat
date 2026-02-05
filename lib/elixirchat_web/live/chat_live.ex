@@ -2,7 +2,7 @@ defmodule ElixirchatWeb.ChatLive do
   use ElixirchatWeb, :live_view
 
   alias Elixirchat.Chat
-  alias Elixirchat.Chat.Reaction
+  alias Elixirchat.Chat.{Reaction, Mentions, Attachment}
   alias Elixirchat.Agent
   alias Elixirchat.Presence
 
@@ -16,6 +16,11 @@ defmodule ElixirchatWeb.ChatLive do
       conversation = Chat.get_conversation!(conversation_id)
       messages = Chat.list_messages(conversation_id)
       members = Chat.list_group_members(conversation_id)
+      pinned_messages = Chat.list_pinned_messages(conversation_id)
+
+      # Load read receipts for all messages
+      message_ids = Enum.map(messages, & &1.id)
+      read_receipts = Chat.get_read_receipts_for_messages(message_ids)
 
       # Track presence and subscribe to updates when connected
       online_user_ids =
@@ -30,7 +35,14 @@ defmodule ElixirchatWeb.ChatLive do
         end
 
       {:ok,
-       assign(socket,
+       socket
+       |> allow_upload(:attachments,
+         accept: Attachment.allowed_extensions(),
+         max_entries: 5,
+         max_file_size: Attachment.max_size(),
+         auto_upload: false
+       )
+       |> assign(
          conversation: conversation,
          messages: messages,
          members: members,
@@ -48,7 +60,12 @@ defmodule ElixirchatWeb.ChatLive do
          show_delete_modal: false,
          delete_message_id: nil,
          reaction_picker_message_id: nil,
-         replying_to: nil
+         replying_to: nil,
+         read_receipts: read_receipts,
+         show_mentions: false,
+         mention_results: [],
+         pinned_messages: pinned_messages,
+         show_pinned: false
        )}
     else
       {:ok, redirect(socket, to: "/chats") |> put_flash(:error, "Access denied")}
@@ -58,8 +75,10 @@ defmodule ElixirchatWeb.ChatLive do
   @impl true
   def handle_event("send_message", %{"message" => content}, socket) do
     content = String.trim(content)
+    has_attachments = length(socket.assigns.uploads.attachments.entries) > 0
 
-    if content != "" do
+    # Allow sending if there's content or attachments
+    if content != "" or has_attachments do
       # Stop typing when message is sent
       if socket.assigns.is_typing do
         Chat.broadcast_typing_stop(socket.assigns.conversation.id, socket.assigns.current_user.id)
@@ -70,18 +89,37 @@ defmodule ElixirchatWeb.ChatLive do
         Process.cancel_timer(socket.assigns.typing_timer)
       end
 
+      # Process uploaded files
+      uploaded_files =
+        consume_uploaded_entries(socket, :attachments, fn %{path: path}, entry ->
+          # Generate unique filename with UUID prefix
+          dest_filename = "#{Ecto.UUID.generate()}-#{entry.client_name}"
+          dest = Path.join(Chat.uploads_dir(), dest_filename)
+          File.cp!(path, dest)
+
+          {:ok, %{
+            filename: dest_filename,
+            original_filename: entry.client_name,
+            content_type: entry.client_type,
+            size: entry.client_size
+          }}
+        end)
+
       # Include reply_to_id if replying to a message
       opts =
         if socket.assigns.replying_to do
-          [reply_to_id: socket.assigns.replying_to.id]
+          [reply_to_id: socket.assigns.replying_to.id, attachments: uploaded_files]
         else
-          []
+          [attachments: uploaded_files]
         end
+
+      # Use a placeholder content if empty but has attachments
+      message_content = if content == "" and has_attachments, do: "[Attachment]", else: content
 
       case Chat.send_message(
         socket.assigns.conversation.id,
         socket.assigns.current_user.id,
-        content,
+        message_content,
         opts
       ) do
         {:ok, _message} ->
@@ -131,6 +169,16 @@ defmodule ElixirchatWeb.ChatLive do
         assign(socket, is_typing: false, typing_timer: nil)
       end
 
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("cancel_upload", %{"ref" => ref}, socket) do
+    {:noreply, cancel_upload(socket, :attachments, ref)}
+  end
+
+  @impl true
+  def handle_event("validate_upload", _params, socket) do
     {:noreply, socket}
   end
 
@@ -215,6 +263,40 @@ defmodule ElixirchatWeb.ChatLive do
   @impl true
   def handle_event("scroll_to_message", %{"message-id" => message_id}, socket) do
     {:noreply, push_event(socket, "scroll_to_message", %{message_id: message_id})}
+  end
+
+  # ===============================
+  # Mention Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("mention_search", %{"query" => query}, socket) do
+    results =
+      if String.length(query) >= 1 do
+        Chat.get_mentionable_users(socket.assigns.conversation.id, query)
+        |> Enum.reject(fn u -> u.id == socket.assigns.current_user.id end)
+      else
+        []
+      end
+
+    {:noreply,
+     assign(socket,
+       mention_results: results,
+       show_mentions: results != []
+     )}
+  end
+
+  @impl true
+  def handle_event("select_mention", %{"username" => username}, socket) do
+    {:noreply,
+     socket
+     |> assign(show_mentions: false, mention_results: [])
+     |> push_event("insert_mention", %{username: username})}
+  end
+
+  @impl true
+  def handle_event("close_mentions", _, socket) do
+    {:noreply, assign(socket, show_mentions: false, mention_results: [])}
   end
 
   # ===============================
@@ -364,6 +446,125 @@ defmodule ElixirchatWeb.ChatLive do
       end)
 
     {:noreply, assign(socket, messages: messages)}
+  end
+
+  # ===============================
+  # Message Pinning Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("pin_message", %{"message-id" => message_id}, socket) do
+    message_id = String.to_integer(message_id)
+
+    case Chat.pin_message(
+      socket.assigns.conversation.id,
+      message_id,
+      socket.assigns.current_user.id
+    ) do
+      {:ok, _pinned} ->
+        {:noreply, socket}
+
+      {:error, :pin_limit_reached} ->
+        {:noreply, put_flash(socket, :error, "Maximum 5 pinned messages allowed")}
+
+      {:error, :already_pinned} ->
+        {:noreply, put_flash(socket, :error, "Message is already pinned")}
+
+      {:error, :message_deleted} ->
+        {:noreply, put_flash(socket, :error, "Cannot pin a deleted message")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to pin message")}
+    end
+  end
+
+  @impl true
+  def handle_event("unpin_message", %{"message-id" => message_id}, socket) do
+    message_id = String.to_integer(message_id)
+
+    case Chat.unpin_message(message_id, socket.assigns.current_user.id) do
+      :ok ->
+        {:noreply, socket}
+
+      {:error, :not_authorized} ->
+        {:noreply, put_flash(socket, :error, "Only the pinner or message author can unpin")}
+
+      {:error, :not_pinned} ->
+        {:noreply, socket}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to unpin message")}
+    end
+  end
+
+  @impl true
+  def handle_event("toggle_pinned", _, socket) do
+    {:noreply, assign(socket, show_pinned: !socket.assigns.show_pinned)}
+  end
+
+  @impl true
+  def handle_event("jump_to_pinned", %{"message-id" => message_id}, socket) do
+    {:noreply,
+     socket
+     |> assign(show_pinned: false)
+     |> push_event("scroll_to_message", %{message_id: message_id})}
+  end
+
+  @impl true
+  def handle_info({:message_pinned, pinned}, socket) do
+    {:noreply, update(socket, :pinned_messages, fn pins -> [pinned | pins] end)}
+  end
+
+  @impl true
+  def handle_info({:message_unpinned, message_id}, socket) do
+    {:noreply,
+     update(socket, :pinned_messages, fn pins ->
+       Enum.reject(pins, fn p -> p.message_id == message_id end)
+     end)}
+  end
+
+  # ===============================
+  # Read Receipt Handlers
+  # ===============================
+
+  @impl true
+  def handle_event("messages_viewed", %{"message_ids" => message_ids}, socket) do
+    # Convert string IDs to integers if needed
+    message_ids = Enum.map(message_ids, fn id ->
+      if is_binary(id), do: String.to_integer(id), else: id
+    end)
+
+    # Only mark messages we didn't send ourselves
+    messages_to_mark =
+      socket.assigns.messages
+      |> Enum.filter(fn msg -> msg.id in message_ids && msg.sender_id != socket.assigns.current_user.id end)
+      |> Enum.map(& &1.id)
+
+    if messages_to_mark != [] do
+      Chat.mark_messages_read(
+        socket.assigns.conversation.id,
+        socket.assigns.current_user.id,
+        messages_to_mark
+      )
+    end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:messages_read, %{user_id: user_id, message_ids: message_ids}}, socket) do
+    # Update read_receipts assign with new reads
+    updated_receipts =
+      Enum.reduce(message_ids, socket.assigns.read_receipts, fn msg_id, acc ->
+        current_readers = Map.get(acc, msg_id, [])
+        if user_id in current_readers do
+          acc
+        else
+          Map.put(acc, msg_id, [user_id | current_readers])
+        end
+      end)
+
+    {:noreply, assign(socket, read_receipts: updated_receipts)}
   end
 
   @impl true
@@ -568,6 +769,52 @@ defmodule ElixirchatWeb.ChatLive do
         </div>
       </div>
 
+      <%!-- Pinned messages section --%>
+      <div :if={length(@pinned_messages) > 0} class="bg-base-200 border-b border-base-300">
+        <button
+          phx-click="toggle_pinned"
+          class="w-full px-4 py-2 flex items-center justify-between hover:bg-base-300 transition-colors"
+        >
+          <div class="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" class="w-4 h-4 text-warning">
+              <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
+            </svg>
+            <span class="text-sm font-medium">{length(@pinned_messages)} Pinned</span>
+          </div>
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class={["w-4 h-4 transition-transform", @show_pinned && "rotate-180"]}>
+            <path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+          </svg>
+        </button>
+
+        <div :if={@show_pinned} class="px-4 pb-2 space-y-2 max-h-48 overflow-y-auto">
+          <div
+            :for={pinned <- @pinned_messages}
+            class="flex items-start justify-between gap-2 p-2 bg-base-100 rounded hover:bg-base-300 cursor-pointer transition-colors"
+            phx-click="jump_to_pinned"
+            phx-value-message-id={pinned.message.id}
+          >
+            <div class="flex-1 min-w-0">
+              <div class="text-xs text-base-content/60">
+                <span class="font-medium">{pinned.message.sender.username}</span>
+                <span> · Pinned by {pinned.pinned_by && pinned.pinned_by.username || "unknown"}</span>
+              </div>
+              <p class="text-sm truncate">{truncate(pinned.message.content, 80)}</p>
+            </div>
+            <button
+              :if={can_unpin?(@current_user.id, pinned)}
+              phx-click="unpin_message"
+              phx-value-message-id={pinned.message.id}
+              class="btn btn-ghost btn-xs btn-circle flex-shrink-0"
+              title="Unpin"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div class="flex-1 overflow-y-auto p-4" id="messages-container" phx-hook="ScrollToBottom">
         <div class="max-w-2xl mx-auto space-y-4">
           <div :if={@messages == []} class="text-center py-12 text-base-content/70">
@@ -577,6 +824,7 @@ defmodule ElixirchatWeb.ChatLive do
           <div
             :for={message <- @messages}
             id={"message-#{message.id}"}
+            data-message-id={message.id}
             class={["chat group", get_chat_position(message, @current_user.id)]}
           >
             <div class="chat-image avatar">
@@ -594,6 +842,22 @@ defmodule ElixirchatWeb.ChatLive do
               <span :if={is_agent_message?(message)} class="badge badge-secondary badge-xs ml-1">AI</span>
               <time class="text-xs opacity-50 ml-1">{format_time(message.inserted_at)}</time>
               <span :if={message.edited_at && !message.deleted_at} class="text-xs opacity-50 ml-1 italic">(edited)</span>
+            </div>
+
+            <%!-- Reply preview (shown above message content) --%>
+            <div
+              :if={message.reply_to}
+              phx-click="scroll_to_message"
+              phx-value-message-id={message.reply_to_id}
+              class="text-xs opacity-70 mb-1 flex items-center gap-1 cursor-pointer hover:opacity-100"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3 flex-shrink-0">
+                <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 19.5 15-15m0 0H8.25m11.25 0v11.25" />
+              </svg>
+              <span :if={message.reply_to.deleted_at} class="italic">Original message was deleted</span>
+              <span :if={is_nil(message.reply_to.deleted_at)} class="truncate">
+                <strong>{message.reply_to.sender.username}:</strong> {truncate(message.reply_to.content, 50)}
+              </span>
             </div>
 
             <%!-- Deleted message placeholder --%>
@@ -625,11 +889,54 @@ defmodule ElixirchatWeb.ChatLive do
                 "chat-bubble",
                 get_bubble_class(message, @current_user.id)
               ]}>
-                {message.content}
+                <%!-- Only show text content if it's not just "[Attachment]" --%>
+                <span :if={message.content != "[Attachment]"}>
+                  <%= raw(Mentions.render_with_mentions(message.content, @conversation.id)) %>
+                </span>
+
+                <%!-- Attachment display --%>
+                <div :if={length(message.attachments) > 0} class={["mt-2 flex flex-wrap gap-2", message.content == "[Attachment]" && "mt-0"]}>
+                  <%= for attachment <- message.attachments do %>
+                    <%= if Attachment.image?(attachment) do %>
+                      <a href={~p"/uploads/#{attachment.filename}"} target="_blank" class="block">
+                        <img src={~p"/uploads/#{attachment.filename}"} alt={attachment.original_filename} class="max-w-xs max-h-48 rounded cursor-pointer hover:opacity-90" loading="lazy" />
+                      </a>
+                    <% else %>
+                      <a href={~p"/uploads/#{attachment.filename}"} download={attachment.original_filename} class="flex items-center gap-2 p-2 bg-base-200 rounded hover:bg-base-300">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                        </svg>
+                        <span class="text-sm">{attachment.original_filename}</span>
+                      </a>
+                    <% end %>
+                  <% end %>
+                </div>
               </div>
 
               <%!-- Action buttons (visible on hover) --%>
               <div class="absolute -top-2 right-0 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                <%!-- Reply button --%>
+                <button
+                  phx-click="start_reply"
+                  phx-value-id={message.id}
+                  class="btn btn-ghost btn-xs btn-circle bg-base-100 shadow-sm"
+                  title="Reply"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
+                  </svg>
+                </button>
+                <%!-- Pin/Unpin button --%>
+                <button
+                  phx-click={if is_message_pinned?(message.id, @pinned_messages), do: "unpin_message", else: "pin_message"}
+                  phx-value-message-id={message.id}
+                  class={["btn btn-ghost btn-xs btn-circle bg-base-100 shadow-sm", is_message_pinned?(message.id, @pinned_messages) && "text-warning"]}
+                  title={if is_message_pinned?(message.id, @pinned_messages), do: "Unpin", else: "Pin"}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill={if is_message_pinned?(message.id, @pinned_messages), do: "currentColor", else: "none"} viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
+                    <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
+                  </svg>
+                </button>
                 <%!-- Reaction button --%>
                 <button
                   phx-click="show_reaction_picker"
@@ -700,36 +1007,143 @@ defmodule ElixirchatWeb.ChatLive do
                 <span class="text-xs">{length(reactors)}</span>
               </button>
             </div>
+
+            <%!-- Read receipt indicator (only for own sent messages) --%>
+            <div :if={message.sender_id == @current_user.id && is_nil(message.deleted_at)} class="chat-footer opacity-50 text-xs flex items-center gap-1 mt-0.5">
+              <%!-- Direct chat: show checkmarks --%>
+              <%= if @conversation.type == "direct" do %>
+                <%= if message_read_by_other?(message.id, @current_user.id, @read_receipts, @conversation) do %>
+                  <%!-- Double checkmark (read) --%>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4 text-primary">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M1.5 12.5l5 5L17 7M7.5 12.5l5 5L23 7"/>
+                  </svg>
+                  <span class="text-primary">Read</span>
+                <% else %>
+                  <%!-- Single checkmark (delivered) --%>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.5l5 5L20 7"/>
+                  </svg>
+                  <span>Delivered</span>
+                <% end %>
+              <% else %>
+                <%!-- Group chat: show read count --%>
+                <% reader_count = get_reader_count(message.id, @current_user.id, @read_receipts) %>
+                <% total_members = length(@members) - 1 %>
+                <%= if reader_count > 0 do %>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4 text-primary">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M1.5 12.5l5 5L17 7M7.5 12.5l5 5L23 7"/>
+                  </svg>
+                  <span class="text-primary cursor-help" title={get_reader_names(message.id, @current_user.id, @read_receipts, @members)}>
+                    Read by {reader_count}/{total_members}
+                  </span>
+                <% else %>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.5l5 5L20 7"/>
+                  </svg>
+                  <span>Delivered</span>
+                <% end %>
+              <% end %>
+            </div>
           </div>
         </div>
       </div>
 
       <div class="bg-base-100 border-t border-base-300 p-4">
         <div class="max-w-2xl mx-auto">
+          <%!-- Reply indicator above input --%>
+          <div :if={@replying_to} class="bg-base-200 p-2 rounded-t-lg flex justify-between items-center mb-0 -mb-1">
+            <div class="text-sm truncate flex-1">
+              <span class="opacity-70">Replying to</span>
+              <strong class="ml-1">{@replying_to.sender.username}</strong>
+              <span class="ml-2 opacity-70">{truncate(@replying_to.content, 40)}</span>
+            </div>
+            <button phx-click="cancel_reply" class="btn btn-ghost btn-xs btn-circle flex-shrink-0">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <%!-- Upload previews --%>
+          <div :if={length(@uploads.attachments.entries) > 0} class="flex flex-wrap gap-2 p-2 bg-base-200 rounded-t-lg mb-0">
+            <div :for={entry <- @uploads.attachments.entries} class="relative">
+              <.live_img_preview :if={String.starts_with?(entry.client_type, "image/")} entry={entry} class="w-20 h-20 object-cover rounded" />
+              <div :if={!String.starts_with?(entry.client_type, "image/")} class="w-20 h-20 bg-base-300 rounded flex items-center justify-center">
+                <div class="text-center p-1">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 mx-auto">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                  </svg>
+                  <span class="text-xs truncate block w-full">{String.slice(entry.client_name, 0..8)}</span>
+                </div>
+              </div>
+              <button type="button" phx-click="cancel_upload" phx-value-ref={entry.ref} class="absolute -top-2 -right-2 btn btn-circle btn-xs btn-error">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
+              <progress :if={entry.progress > 0 && entry.progress < 100} value={entry.progress} max="100" class="absolute bottom-0 left-0 w-full h-1 progress progress-primary" />
+            </div>
+            <%!-- Upload errors --%>
+            <div :for={err <- upload_errors(@uploads.attachments)} class="text-error text-sm">
+              {upload_error_to_string(err)}
+            </div>
+          </div>
+
           <div :if={MapSet.size(@typing_users) > 0} class="text-sm text-base-content/60 italic pb-2 h-6">
             <span class="typing-indicator">
               {format_typing_users(@typing_users)}
               <span class="typing-dots">...</span>
             </span>
           </div>
-          <div :if={MapSet.size(@typing_users) == 0} class="h-6 pb-2"></div>
-          <form phx-submit="send_message" class="flex gap-2">
-            <input
-              type="text"
-              name="message"
-              value={@message_input}
-              placeholder="Type a message..."
-              class="input input-bordered flex-1"
-              autocomplete="off"
-              phx-change="update_input"
-              phx-debounce="100"
-            />
-            <button type="submit" class="btn btn-primary">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
-              </svg>
-            </button>
-          </form>
+          <div :if={MapSet.size(@typing_users) == 0 && is_nil(@replying_to) && length(@uploads.attachments.entries) == 0} class="h-6 pb-2"></div>
+          <div class="relative" id="mention-input-container" phx-hook="MentionInput">
+            <%!-- Mention autocomplete dropdown --%>
+            <div
+              :if={@show_mentions && @mention_results != []}
+              class="absolute bottom-full left-0 mb-2 w-64 bg-base-100 border border-base-300 rounded-lg shadow-lg z-20"
+            >
+              <ul class="menu menu-compact p-2">
+                <li :for={user <- @mention_results}>
+                  <button
+                    type="button"
+                    phx-click="select_mention"
+                    phx-value-username={user.username}
+                    class="flex items-center gap-2"
+                  >
+                    <div class="avatar placeholder">
+                      <div class="bg-neutral text-neutral-content rounded-full w-6">
+                        <span class="text-xs">{String.first(user.username) |> String.upcase()}</span>
+                      </div>
+                    </div>
+                    <span>@{user.username}</span>
+                  </button>
+                </li>
+              </ul>
+            </div>
+            <form phx-submit="send_message" phx-change="validate_upload" class="flex gap-2">
+              <%!-- Attachment button --%>
+              <label class="btn btn-ghost btn-circle cursor-pointer self-center">
+                <.live_file_input upload={@uploads.attachments} class="hidden" />
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13" />
+                </svg>
+              </label>
+              <input
+                type="text"
+                name="message"
+                value={@message_input}
+                placeholder="Type a message... (@ to mention)"
+                class="input input-bordered flex-1"
+                autocomplete="off"
+                phx-change="update_input"
+                phx-debounce="100"
+              />
+              <button type="submit" class="btn btn-primary">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
+                </svg>
+              </button>
+            </form>
+          </div>
         </div>
       </div>
 
@@ -876,5 +1290,62 @@ defmodule ElixirchatWeb.ChatLive do
   defp truncate(text, max_length) when byte_size(text) <= max_length, do: text
   defp truncate(text, max_length) do
     String.slice(text, 0, max_length) <> "..."
+  end
+
+  # Read receipt helpers
+
+  # Checks if message is read by the other user in a direct conversation
+  defp message_read_by_other?(message_id, sender_id, read_receipts, conversation) do
+    readers = Map.get(read_receipts, message_id, [])
+    # In direct chat, the "other" user is whoever isn't the sender
+    other_member = Enum.find(conversation.members, fn m -> m.user_id != sender_id end)
+
+    if other_member do
+      other_member.user_id in readers
+    else
+      false
+    end
+  end
+
+  # Gets the count of users who have read a message (excluding the sender)
+  defp get_reader_count(message_id, sender_id, read_receipts) do
+    readers = Map.get(read_receipts, message_id, [])
+    Enum.count(readers, fn reader_id -> reader_id != sender_id end)
+  end
+
+  # Gets the names of users who have read a message (for tooltip)
+  defp get_reader_names(message_id, sender_id, read_receipts, members) do
+    reader_ids = Map.get(read_receipts, message_id, [])
+
+    members
+    |> Enum.filter(fn m -> m.id in reader_ids && m.id != sender_id end)
+    |> case do
+      [] ->
+        ""
+
+      readers when length(readers) <= 5 ->
+        Enum.map_join(readers, ", ", & &1.username)
+
+      [r1, r2, r3, r4, r5 | rest] ->
+        "#{r1.username}, #{r2.username}, #{r3.username}, #{r4.username}, #{r5.username} and #{length(rest)} more"
+    end
+  end
+
+  # Upload error helpers
+  defp upload_error_to_string(:too_large), do: "File too large (max 10MB)"
+  defp upload_error_to_string(:too_many_files), do: "Too many files (max 5)"
+  defp upload_error_to_string(:not_accepted), do: "File type not allowed"
+  defp upload_error_to_string(err), do: "Upload error: #{inspect(err)}"
+
+  # Pinning helpers
+
+  # Checks if a message is pinned
+  defp is_message_pinned?(message_id, pinned_messages) do
+    Enum.any?(pinned_messages, fn p -> p.message_id == message_id end)
+  end
+
+  # Checks if user can unpin (is the pinner or message author)
+  defp can_unpin?(user_id, pinned) do
+    pinned.pinned_by_id == user_id || pinned.message.sender_id == user_id
   end
 end

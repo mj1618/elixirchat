@@ -27,15 +27,236 @@ import topbar from "../vendor/topbar"
 
 // Custom hooks for chat functionality
 const Hooks = {
+  MentionInput: {
+    mounted() {
+      this.input = this.el.querySelector('input[name="message"]');
+      this.fileInput = this.el.querySelector('input[type="file"]');
+      if (!this.input) return;
+      
+      this.mentionStart = null;
+      this.debounceTimer = null;
+      
+      this.input.addEventListener('input', (e) => {
+        this.handleInput();
+      });
+      
+      this.input.addEventListener('keydown', (e) => {
+        // Handle escape to close mention dropdown
+        if (e.key === 'Escape') {
+          this.mentionStart = null;
+          this.pushEvent("close_mentions", {});
+        }
+      });
+      
+      // Listen for mention insertion from server
+      this.handleEvent("insert_mention", ({username}) => {
+        if (this.mentionStart !== null && this.input) {
+          const value = this.input.value;
+          const before = value.substring(0, this.mentionStart);
+          const after = value.substring(this.input.selectionStart);
+          this.input.value = `${before}@${username} ${after}`;
+          this.input.focus();
+          const newPos = this.mentionStart + username.length + 2; // +2 for @ and space
+          this.input.setSelectionRange(newPos, newPos);
+          this.mentionStart = null;
+          
+          // Trigger input event so LiveView updates
+          this.input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      });
+
+      // Drag and drop support
+      this.setupDragAndDrop();
+      
+      // Paste support for images
+      this.setupPasteHandler();
+    },
+    
+    setupDragAndDrop() {
+      const form = this.el.querySelector('form');
+      if (!form) return;
+
+      // Prevent default drag behaviors
+      ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        form.addEventListener(eventName, (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        });
+      });
+
+      // Highlight drop area on drag over
+      ['dragenter', 'dragover'].forEach(eventName => {
+        form.addEventListener(eventName, () => {
+          form.classList.add('ring-2', 'ring-primary', 'ring-opacity-50');
+        });
+      });
+
+      ['dragleave', 'drop'].forEach(eventName => {
+        form.addEventListener(eventName, () => {
+          form.classList.remove('ring-2', 'ring-primary', 'ring-opacity-50');
+        });
+      });
+
+      // Handle dropped files
+      form.addEventListener('drop', (e) => {
+        const files = e.dataTransfer.files;
+        if (files.length > 0 && this.fileInput) {
+          // Create a new DataTransfer to set files on the input
+          const dt = new DataTransfer();
+          for (let i = 0; i < files.length; i++) {
+            dt.items.add(files[i]);
+          }
+          this.fileInput.files = dt.files;
+          // Trigger change event for LiveView to pick up
+          this.fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+    },
+
+    setupPasteHandler() {
+      this.input.addEventListener('paste', (e) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          if (item.type.startsWith('image/')) {
+            e.preventDefault();
+            const file = item.getAsFile();
+            if (file && this.fileInput) {
+              const dt = new DataTransfer();
+              dt.items.add(file);
+              this.fileInput.files = dt.files;
+              this.fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            break;
+          }
+        }
+      });
+    },
+    
+    handleInput() {
+      const value = this.input.value;
+      const cursorPos = this.input.selectionStart;
+      
+      // Find @ before cursor
+      const textBeforeCursor = value.substring(0, cursorPos);
+      const lastAtIndex = textBeforeCursor.lastIndexOf('@');
+      
+      if (lastAtIndex !== -1) {
+        const textAfterAt = textBeforeCursor.substring(lastAtIndex + 1);
+        // Check if we're in a mention (no spaces after @)
+        if (!/\s/.test(textAfterAt)) {
+          this.mentionStart = lastAtIndex;
+          
+          // Debounce the search
+          clearTimeout(this.debounceTimer);
+          this.debounceTimer = setTimeout(() => {
+            this.pushEvent("mention_search", { query: textAfterAt });
+          }, 150);
+          return;
+        }
+      }
+      
+      this.mentionStart = null;
+      this.pushEvent("close_mentions", {});
+    },
+    
+    destroyed() {
+      if (this.debounceTimer) {
+        clearTimeout(this.debounceTimer);
+      }
+    }
+  },
+
   ScrollToBottom: {
     mounted() {
       this.scrollToBottom()
+      
+      // Listen for scroll_to_message events
+      this.handleEvent("scroll_to_message", ({message_id}) => {
+        const element = document.getElementById(`message-${message_id}`);
+        if (element) {
+          element.scrollIntoView({ behavior: "smooth", block: "center" });
+          element.classList.add("highlight-message");
+          setTimeout(() => element.classList.remove("highlight-message"), 2000);
+        }
+      });
+
+      // Set up read receipt tracking
+      this.setupReadReceiptTracking();
     },
     updated() {
       this.scrollToBottom()
+      // Re-observe new messages after update
+      this.observeNewMessages();
     },
     scrollToBottom() {
       this.el.scrollTop = this.el.scrollHeight
+    },
+    setupReadReceiptTracking() {
+      // Track which messages have been read
+      this.readMessages = new Set();
+      this.pendingReads = new Set();
+      this.sendTimeout = null;
+
+      // Create intersection observer for detecting visible messages
+      this.observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach(entry => {
+            if (entry.isIntersecting) {
+              const messageId = entry.target.dataset.messageId;
+              if (messageId && !this.readMessages.has(messageId)) {
+                this.pendingReads.add(messageId);
+                this.scheduleSendReads();
+              }
+            }
+          });
+        },
+        { threshold: 0.5, root: this.el }
+      );
+
+      // Observe all existing message elements
+      this.observeAllMessages();
+    },
+    observeAllMessages() {
+      const messages = this.el.querySelectorAll('[data-message-id]');
+      messages.forEach(el => {
+        if (!el._observed) {
+          this.observer.observe(el);
+          el._observed = true;
+        }
+      });
+    },
+    observeNewMessages() {
+      // Find and observe any new message elements
+      const messages = this.el.querySelectorAll('[data-message-id]');
+      messages.forEach(el => {
+        if (!el._observed) {
+          this.observer.observe(el);
+          el._observed = true;
+        }
+      });
+    },
+    scheduleSendReads() {
+      if (this.sendTimeout) return;
+      this.sendTimeout = setTimeout(() => {
+        const ids = Array.from(this.pendingReads);
+        if (ids.length > 0) {
+          this.pushEvent("messages_viewed", { message_ids: ids });
+          ids.forEach(id => this.readMessages.add(id));
+          this.pendingReads.clear();
+        }
+        this.sendTimeout = null;
+      }, 500);
+    },
+    destroyed() {
+      if (this.observer) {
+        this.observer.disconnect();
+      }
+      if (this.sendTimeout) {
+        clearTimeout(this.sendTimeout);
+      }
     }
   }
 }
